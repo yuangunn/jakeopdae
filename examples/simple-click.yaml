@@ -1,0 +1,38 @@
+# Example macro: wait 1s, then click at absolute (500, 400),
+# then press Enter, then wait 0.2s.
+#
+# Run with:  py -m keymacro run examples/simple-click.yaml
+
+name: simple-click
+description: Smoke-test that the runner is wired up end to end.
+max_total_runtime_s: 30
+
+steps:
+  - id: warmup
+    name: brief pause
+    trigger:
+      type: time
+      delay_s: 1.0
+    action:
+      type: wait
+      duration_s: 0.0
+
+  - id: click_target
+    name: click absolute position
+    trigger:
+      type: time
+      delay_s: 0.0
+    action:
+      type: click
+      x: 500
+      y: 400
+      button: left
+
+  - id: press_enter
+    name: confirm with enter
+    trigger:
+      type: time
+      delay_s: 0.2
+    action:
+      type: key
+      keys: enter

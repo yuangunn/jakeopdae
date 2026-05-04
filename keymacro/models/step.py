@@ -1,0 +1,52 @@
+"""A Step pairs a trigger with an action plus failure / branching policy."""
+
+from __future__ import annotations
+
+from typing import Literal, Optional
+
+from pydantic import BaseModel, Field, field_validator
+
+from .action import Action
+from .trigger import Trigger
+
+
+class Step(BaseModel):
+    """One unit of work in a macro.
+
+    The ``trigger`` is awaited (image polling, sleep, pixel polling); when it
+    fires the ``action`` is executed. ``on_failure`` controls what happens
+    when the trigger times out or the action raises.
+
+    ``on_success_goto`` lets you jump to an arbitrary step id rather than the
+    next one in the list, enabling simple branching.
+    """
+
+    id: str
+    name: str = ""
+    trigger: Trigger
+    action: Action
+    on_failure: Literal["abort", "skip", "retry"] = "abort"
+    retry_count: int = 0
+    on_success_goto: Optional[str] = None
+    repeat: int = 1
+
+    @field_validator("id")
+    @classmethod
+    def _id_non_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("step id must not be empty")
+        return v
+
+    @field_validator("retry_count")
+    @classmethod
+    def _retry_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("retry_count must be >= 0")
+        return v
+
+    @field_validator("repeat")
+    @classmethod
+    def _repeat_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("repeat must be >= 1")
+        return v

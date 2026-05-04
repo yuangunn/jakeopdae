@@ -1,0 +1,41 @@
+# 예시: 필수교육 페이지에서 [다음] 버튼이 활성화되면 자동으로 클릭
+#
+# 사용 전 준비:
+#   1. py -m keymacro chrome-launch
+#      (또는 Chrome을 직접 --remote-debugging-port=9222 로 시작)
+#   2. 그 Chrome에서 강의 페이지 로그인 + 첫 강의 열기
+#   3. py -m keymacro run examples\web-training.yaml
+
+name: 필수교육-자동화
+description: 강의 [다음] 버튼이 보이면 클릭, URL 바뀌면 다음 강의로 진행
+max_total_runtime_s: 7200
+
+web_session:
+  mode: attach
+  cdp_endpoint: http://localhost:9222
+
+steps:
+  - id: wait_next_button
+    name: "[다음] 버튼이 활성화될 때까지 대기"
+    trigger:
+      type: web_element
+      selector: "button:has-text('다음')"
+      url_contains: "/lec/"
+      state: visible
+      timeout_s: 1800       # 영상 길이 만큼 충분히
+      poll_interval_s: 2.0
+    action:
+      type: web_click
+      selector: "button:has-text('다음')"
+
+  - id: wait_url_change
+    name: "URL이 다음 강의로 바뀔 때까지 대기"
+    trigger:
+      type: web_url
+      pattern: "/lec/"
+      mode: contains
+      timeout_s: 30
+    action:
+      type: wait
+      duration_s: 1.5
+    on_success_goto: wait_next_button   # 무한 반복 (루프)

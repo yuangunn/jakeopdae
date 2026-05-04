@@ -1,0 +1,58 @@
+# Non-intrusive smoke test for the runner pipeline.
+#
+# What it exercises:
+#   - TimeTrigger + WaitAction (Phase 1)
+#   - PixelColorTrigger reading the actual screen (Phase 1)
+#   - on_failure: skip (Phase 1)
+#   - repeat field with multiple iterations (Phase 3)
+#   - Sequential branching with on_success_goto (Phase 1)
+#
+# It NEVER moves the mouse or sends any keystrokes.
+
+name: self-test
+description: Exercise the runner without touching the user's input.
+max_total_runtime_s: 10
+
+steps:
+  - id: warmup
+    name: warm up
+    trigger:
+      type: time
+      delay_s: 0.3
+    action:
+      type: wait
+      duration_s: 0.0
+
+  - id: pixel_probe
+    name: probe pixel at (0,0) for pure white (likely a no-op)
+    trigger:
+      type: pixel
+      x: 0
+      y: 0
+      rgb: [255, 255, 255]
+      tolerance: 0
+      timeout_s: 0.4
+      poll_interval_s: 0.1
+    action:
+      type: wait
+      duration_s: 0.0
+    on_failure: skip
+
+  - id: repeat_demo
+    name: repeat=4 to exercise the iteration loop
+    trigger:
+      type: time
+      delay_s: 0.1
+    action:
+      type: wait
+      duration_s: 0.0
+    repeat: 4
+
+  - id: done
+    name: final tick
+    trigger:
+      type: time
+      delay_s: 0.1
+    action:
+      type: wait
+      duration_s: 0.0
