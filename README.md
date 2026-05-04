@@ -140,6 +140,54 @@ keymacro/
 5. **KeyMacro에서 못 하는 DOM 동작** — 웹 요소가 *활성화*된 시점에 클릭
    (KeyMacro는 픽셀 모양만 봐서 disabled/enabled 구분 못 함)
 
+## 단일 파일 배포 (.exe)
+
+비개발자 친구한테 더블클릭 한 번으로 쓰게 하고 싶으면 PyInstaller로 단일
+``jakeopdae.exe`` 만들 수 있습니다. NotoSansKR 폰트 + Qt + OpenCV가 다
+들어가서 약 270 MB.
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+pip install pyinstaller
+pyinstaller packaging\keymacro.spec --clean --noconfirm
+# → dist\jakeopdae.exe
+```
+
+빌드 후 사용자에게 보낼 것:
+
+| 필수 | 옵션 |
+|---|---|
+| ``jakeopdae.exe`` (270 MB) | Tesseract (OCR을 쓸 때만) |
+| | ``playwright install chromium`` (웹 매크로 + 요소 picker를 쓸 때) |
+
+**디버그 빌드** — 콘솔 창이 뜨고 stderr가 보이는 진단용 ``jakeopdae-debug.exe``:
+
+```powershell
+pyinstaller packaging\keymacro-console.spec --clean --noconfirm
+```
+
+크래시 / 누락된 hidden import를 추적할 때만 쓰세요.
+
+## 사용자 가이드 (exe 받은 사람용)
+
+1. ``jakeopdae.exe`` 더블클릭 → 5 ~ 10초 뒤 GUI 뜸 (one-file이라 첫 실행시
+   임시 폴더로 압축 해제)
+2. 우상단 [○ Chrome 시작] 누름 → keymacro 전용 Chrome 창이 뜸 → 학교 사이트
+   로그인 (한 번만)
+3. [+ 단계 추가] → 원하는 단계 종류 선택 → 영역/셀렉터 지정
+4. 좌하단 [▶ 시작 (F9)] 또는 F9 핫키
+5. 정지: F10 / 일시정지: F11
+
+자주 묻는 것:
+
+- **Windows Defender가 막아요** → "추가 정보" → "실행" 클릭. PyInstaller로 만든
+  서명 안 된 exe라 SmartScreen이 처음 한 번 경고함. 안전한 코드.
+- **느려요 / 첫 실행이 오래 걸려요** → one-file 압축 해제 때문. 두 번째부터는
+  ``%LOCALAPPDATA%\Temp\_MEI…`` 캐시가 있어서 빠릅니다.
+- **OCR이 "Tesseract을 찾을 수 없어요"라고 떠요** →
+  https://github.com/UB-Mannheim/tesseract/wiki 에서 Windows installer 받아서
+  설치. 설치 시 "Korean" 언어팩 체크.
+
 ## 라이선스
 
 MIT. 자유롭게 fork / 수정 / 배포.
