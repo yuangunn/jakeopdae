@@ -17,7 +17,10 @@ htmlcov/
 dist/
 build/
 *.egg-info/
-*.spec
+# PyInstaller generates *.spec at build root; we keep our hand-written
+# specs under packaging/ so explicitly un-ignore them.
+/*.spec
+!packaging/*.spec
 
 .vscode/
 .idea/
