@@ -1,0 +1,147 @@
+# 모든 트리거 9종 + 모든 액션 9종을 한 매크로에서 사용하는 검증용 매크로.
+# 실제로 실행하면 마우스/키 입력이 발생하므로 ``validate``만 돌리는 게 안전.
+
+name: full-coverage-test
+description: 9 trigger × 9 action discriminated-union round-trip
+max_total_runtime_s: 60
+
+variables:
+  username: alice
+  otp: "000000"
+
+steps:
+  # ===== 9 trigger 종류 =====
+
+  - id: t_image
+    name: 이미지 트리거
+    trigger:
+      type: image
+      template: templates/icon.png
+      region: { x: 0, y: 0, w: 100, h: 100 }
+      confidence: 0.9
+    action: { type: wait, duration_s: 0 }
+    on_failure: skip
+
+  - id: t_time
+    name: 시간 트리거
+    trigger: { type: time, delay_s: 0 }
+    action: { type: wait, duration_s: 0 }
+
+  - id: t_pixel
+    name: 픽셀 트리거
+    trigger:
+      type: pixel
+      x: 0
+      y: 0
+      rgb: [255, 255, 255]
+      tolerance: 10
+    action: { type: wait, duration_s: 0 }
+    on_failure: skip
+
+  - id: t_web_element
+    name: 웹 요소 트리거
+    trigger:
+      type: web_element
+      selector: 'role=button[name="다음"]'
+      url_contains: "example.com"
+      state: visible
+    action: { type: wait, duration_s: 0 }
+    on_failure: skip
+
+  - id: t_web_url
+    name: URL 트리거
+    trigger:
+      type: web_url
+      pattern: "/lec/"
+      mode: contains
+    action: { type: wait, duration_s: 0 }
+    on_failure: skip
+
+  - id: t_hybrid
+    name: 하이브리드 트리거 (이미지+URL)
+    trigger:
+      type: hybrid_image
+      template: templates/icon.png
+      region: { x: 0, y: 0, w: 100, h: 100 }
+      url_contains: "example.com"
+      url_mode: contains
+      browser: any
+    action: { type: wait, duration_s: 0 }
+    on_failure: skip
+
+  - id: t_ocr
+    name: OCR 트리거
+    trigger:
+      type: ocr_text
+      region: { x: 0, y: 0, w: 200, h: 50 }
+      text: "다음"
+      mode: contains
+      language: kor+eng
+    action: { type: wait, duration_s: 0 }
+    on_failure: skip
+
+  - id: t_schedule
+    name: 예약 트리거
+    trigger:
+      type: schedule
+      at: "09:00"
+      weekdays: [0, 1, 2, 3, 4]
+    action: { type: wait, duration_s: 0 }
+    on_failure: skip
+
+  # ===== 9 action 종류 (모두 time trigger로 즉시 발사) =====
+
+  - id: a_click
+    name: 클릭
+    trigger: { type: time, delay_s: 0 }
+    action: { type: click, x: 0, y: 0, button: left }
+
+  - id: a_key
+    name: 키 입력
+    trigger: { type: time, delay_s: 0 }
+    action: { type: key, keys: "ctrl+c" }
+
+  - id: a_type
+    name: 텍스트 입력 (변수 치환 포함)
+    trigger: { type: time, delay_s: 0 }
+    action: { type: type, text: "hello ${username}, otp is ${otp}" }
+
+  - id: a_drag
+    name: 드래그
+    trigger: { type: time, delay_s: 0 }
+    action: { type: drag, x1: 0, y1: 0, x2: 100, y2: 100, button: left }
+
+  - id: a_wait
+    name: 멈춤
+    trigger: { type: time, delay_s: 0 }
+    action: { type: wait, duration_s: 0 }
+
+  - id: a_web_click
+    name: 웹 클릭
+    trigger: { type: time, delay_s: 0 }
+    action:
+      type: web_click
+      selector: 'role=button[name="확인"]'
+      button: left
+
+  - id: a_web_type
+    name: 웹 텍스트 입력
+    trigger: { type: time, delay_s: 0 }
+    action:
+      type: web_type
+      selector: 'input[name="username"]'
+      text: "${username}"
+
+  - id: a_web_navigate
+    name: URL 이동
+    trigger: { type: time, delay_s: 0 }
+    action: { type: web_navigate, url: "https://example.com", wait_until: load }
+
+  - id: a_extract
+    name: 텍스트 추출 → 변수
+    trigger: { type: time, delay_s: 0 }
+    action:
+      type: extract_text
+      region: { x: 0, y: 0, w: 200, h: 50 }
+      variable: extracted_otp
+      language: kor+eng
