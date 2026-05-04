@@ -28,6 +28,11 @@ class StepListPanel(QWidget):
     duplicate_requested = Signal(int)
     move_up_requested = Signal(int)
     move_down_requested = Signal(int)
+    reorder_requested = Signal(int, int)
+    """``(src_row, target_index)`` after a drag-drop. The host adjusts
+    indices to do the correct ``pop + insert``."""
+    examples_requested = Signal()
+    """Fired when the empty-state's "📚 예제 살펴보기" button is clicked."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -91,7 +96,13 @@ class StepListPanel(QWidget):
 
     # --- public API -----------------------------------------------------
 
-    def set_steps(self, steps: list[Step], select_index: int = 0) -> None:
+    def set_steps(
+        self,
+        steps: list[Step],
+        select_index: int = 0,
+        *,
+        show_examples_button: bool = False,
+    ) -> None:
         for card in self._cards:
             self._inner_layout.removeWidget(card)
             card.deleteLater()
@@ -104,8 +115,9 @@ class StepListPanel(QWidget):
         self._count_lbl.setText(f"{len(steps)}개")
 
         if not steps:
-            self._empty = EmptyState()
+            self._empty = EmptyState(show_examples_button=show_examples_button)
             self._empty.add_requested.connect(self.add_requested)
+            self._empty.examples_requested.connect(self.examples_requested)
             self._inner_layout.insertWidget(0, self._empty)
             self._selected_row = -1
             return
@@ -115,6 +127,7 @@ class StepListPanel(QWidget):
             card.selected.connect(self.selected)
             card.delete_requested.connect(self.delete_requested)
             card.duplicate_requested.connect(self.duplicate_requested)
+            card.reorder_requested.connect(self.reorder_requested)
             self._cards.append(card)
             self._inner_layout.insertWidget(self._inner_layout.count() - 1, card)
 

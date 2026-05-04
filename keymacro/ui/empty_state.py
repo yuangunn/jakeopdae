@@ -17,8 +17,9 @@ from .theme import C
 
 class EmptyState(QWidget):
     add_requested = Signal()
+    examples_requested = Signal()
 
-    def __init__(self) -> None:
+    def __init__(self, *, show_examples_button: bool = False) -> None:
         super().__init__()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 36, 20, 36)
@@ -41,7 +42,14 @@ class EmptyState(QWidget):
         layout.addWidget(title)
         layout.addSpacing(6)
 
-        body = QLabel("위의 [＋ 단계 추가] 버튼을 눌러\n첫 단계를 만들어 보세요.")
+        if show_examples_button:
+            body_text = (
+                "위의 [＋ 단계 추가]로 직접 만들거나\n"
+                "[📚 예제 살펴보기]에서 미리 만들어둔 매크로를 참고해 보세요."
+            )
+        else:
+            body_text = "위의 [＋ 단계 추가] 버튼을 눌러\n첫 단계를 만들어 보세요."
+        body = QLabel(body_text)
         body.setAlignment(Qt.AlignCenter)
         body.setStyleSheet(
             f"color: {C['on-surface-variant']}; font-size: 12px; line-height: 1.5;"
@@ -49,14 +57,23 @@ class EmptyState(QWidget):
         layout.addWidget(body)
         layout.addSpacing(14)
 
-        btn = QPushButton("＋  단계 추가")
-        btn.setProperty("role", "primary")
-        btn.setCursor(Qt.PointingHandCursor)
-        btn.clicked.connect(self.add_requested)
+        # Action row — primary "+ 단계 추가" plus optional "예제 살펴보기".
         wrap = QFrame()
         h = QHBoxLayout(wrap)
         h.setContentsMargins(0, 0, 0, 0)
         h.addStretch()
+
+        if show_examples_button:
+            ex_btn = QPushButton("📚  예제 살펴보기")
+            ex_btn.setProperty("role", "ghost")
+            ex_btn.setCursor(Qt.PointingHandCursor)
+            ex_btn.clicked.connect(self.examples_requested)
+            h.addWidget(ex_btn)
+
+        btn = QPushButton("＋  단계 추가")
+        btn.setProperty("role", "primary")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.clicked.connect(self.add_requested)
         h.addWidget(btn)
         h.addStretch()
         layout.addWidget(wrap)

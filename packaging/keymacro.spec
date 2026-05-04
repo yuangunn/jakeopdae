@@ -41,6 +41,13 @@ datas = [
     for p in _fonts_dir.glob("*.ttf")
 ]
 
+# Bundled example macros — surface them in the library on first launch
+# via ``main_window._bundled_examples_dir()`` resolving to
+# ``sys._MEIPASS/examples`` at runtime.
+_examples_dir = ROOT / "examples"
+for _yaml in _examples_dir.glob("*.yaml"):
+    datas.append((str(_yaml), "examples"))
+
 # PySide6 needs its translations / styles / image plugins shipped along.
 datas += collect_data_files("PySide6", includes=["**/translations/*", "**/plugins/**"])
 
@@ -81,10 +88,31 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# --- splash screen ---------------------------------------------------------
+#
+# PyInstaller's bootloader displays this PNG immediately after extracting
+# the bundle and tears it down once Python calls ``pyi_splash.close()``
+# (we do that in ``ui/app.py`` right after ``MainWindow`` is built).
+# Without this the user stares at a blank desktop for the 5-10 s
+# extraction window — feels broken on first launch.
+
+splash = Splash(
+    str(ROOT / "packaging" / "splash.png"),
+    binaries=a.binaries,
+    datas=a.datas,
+    text_pos=None,
+    text_size=12,
+    text_color="white",
+    minify_script=True,
+    always_on_top=False,
+)
+
 # --- single-file executable -------------------------------------------------
 
 exe = EXE(
     pyz,
+    splash,
+    splash.binaries,
     a.scripts,
     a.binaries,
     a.zipfiles,
@@ -102,7 +130,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,         # add a .ico path here when we have an icon
+    icon=str(ROOT / "packaging" / "jakeopdae.ico"),
 )
 
 

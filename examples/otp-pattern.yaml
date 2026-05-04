@@ -1,0 +1,47 @@
+# 변수 시스템 사용 예시 — OCR로 화면의 6자리 OTP를 추출해서
+# 다음 단계에서 ${otp}로 폼에 자동 입력합니다.
+#
+# 사용 시나리오:
+#   1. OTP 발송 후 메일/문자 화면에 6자리가 떠 있을 때
+#   2. 그 위치를 region에 잡아둠
+#   3. 매크로 실행 → OCR이 추출 → 자동으로 결제/로그인 폼에 붙여 넣음
+
+name: OTP-자동입력
+description: OCR로 6자리 코드 추출 → 폼 자동 입력
+max_total_runtime_s: 60
+
+variables:
+  # 추출하기 전 기본값. 추출 실패 시 폴백.
+  otp: "000000"
+
+steps:
+  - id: focus_otp_field
+    name: OTP 폼 필드 클릭
+    trigger: { type: time, delay_s: 0.5 }
+    # 실제 사용 시 OTP 입력 필드의 좌표로 바꾸세요.
+    action: { type: click, x: 800, y: 400 }
+
+  - id: extract_otp
+    name: 화면에서 6자리 코드 추출
+    trigger: { type: time, delay_s: 0.3 }
+    action:
+      type: extract_text
+      # OTP가 표시되는 화면 영역 — 실제 좌표로 조정.
+      region: { x: 600, y: 200, w: 300, h: 60 }
+      variable: otp
+      language: eng
+      strip: true
+
+  - id: paste_otp
+    name: 추출한 OTP를 폼에 입력
+    trigger: { type: time, delay_s: 0.2 }
+    action:
+      type: type
+      text: "${otp}"
+      # 한 글자씩 붙이는 사이트가 있으면 interval_s 늘리기:
+      # interval_s: 0.05
+
+  - id: submit
+    name: Enter로 제출
+    trigger: { type: time, delay_s: 0.5 }
+    action: { type: key, keys: enter }

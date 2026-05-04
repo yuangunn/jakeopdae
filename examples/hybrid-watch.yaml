@@ -1,0 +1,38 @@
+# 하이브리드 트리거 데모 — 디버그 모드 Chrome 없이도 일반 브라우저에서
+# URL + 이미지 매칭으로 매크로 발사.
+#
+# 사용 시나리오:
+#   - 학교 LMS의 [다음으로] 버튼을 픽셀 매칭으로 잡되, *그 사이트일 때만*
+#   - 쇼핑몰 결제 페이지에서 특정 버튼 활성화 감지
+#   - 일반 사용자 Chrome 그대로 사용 (디버그 모드 X)
+#
+# 작동 원리:
+#   1. Windows UI Automation으로 활성 브라우저 주소창 텍스트 읽음
+#   2. URL이 ``url_contains`` 매치되면
+#   3. 그제서야 화면 영역에서 이미지 매칭 시도
+#   4. 둘 다 매치하면 액션 발사
+
+name: 하이브리드-사이트-감시
+description: 일반 Chrome에서 URL+이미지 동시 매칭 후 클릭
+max_total_runtime_s: 1800   # 30분
+
+steps:
+  - id: wait_button
+    name: 학교 사이트 [다음으로] 버튼 대기
+    trigger:
+      type: hybrid_image
+      template: templates/next-button.png   # 직접 캡처해서 넣기
+      region: { x: 800, y: 600, w: 400, h: 200 }
+      url_contains: "lms"           # 학교 LMS 도메인 일부
+      url_mode: contains            # contains | regex | exact
+      browser: any                  # any | chrome | edge | firefox
+      confidence: 0.92
+      timeout_s: 1800
+      poll_interval_s: 1.0          # 1초 간격으로 체크 (CPU 절약)
+    action:
+      type: click
+      relative_to_match: true       # 매칭된 위치 기준
+      x: 0
+      y: 0
+    # 다음으로 버튼 → 다음 강의 페이지 → 다시 wait_button로 돌아감
+    on_success_goto: wait_button

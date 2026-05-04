@@ -143,8 +143,18 @@ class MainWindow(QMainWindow):
         self._runner_thread: Optional[RunnerThread] = None
 
         self._library = load_library()
+        # Auto-seed the library with the bundled examples folder so a
+        # brand-new install doesn't open to an empty sidebar.
+        self._seed_examples_on_first_launch()
         self._picker_thread: Optional[PickerThread] = None
         self._picker_field: Optional[str] = None
+
+        # Memento stack for Ctrl+Z. Snapshots are macro JSON dumps; the
+        # stack is bounded so an editing marathon doesn't grow without
+        # bound. Text edits in the form are *not* snapshotted (too
+        # granular) — only structural ops (add/remove/move/duplicate).
+        self._undo_stack: list[dict] = []
+        self._undo_max = 50
 
         # Persistent run history — every Runner invocation is mirrored.
         self._history = HistoryStore(default_history_path())
@@ -350,6 +360,8 @@ class MainWindow(QMainWindow):
         self.list_panel.duplicate_requested.connect(self._on_duplicate_step)
         self.list_panel.move_up_requested.connect(lambda r: self._move_step(-1))
         self.list_panel.move_down_requested.connect(lambda r: self._move_step(+1))
+        self.list_panel.reorder_requested.connect(self._on_reorder_steps)
+        self.list_panel.examples_requested.connect(self._on_browse_examples)
 
         self.form.step_changed.connect(self._on_form_changed)
         self.form.pick_region_requested.connect(self._pick_region)
@@ -374,6 +386,16 @@ class MainWindow(QMainWindow):
         QShortcut(
             QKeySequence("Ctrl+B"), self,
             activated=self.library_panel.toggle_collapsed,
+        )
+        # Ctrl+D — duplicate the currently-selected step.
+        QShortcut(
+            QKeySequence("Ctrl+D"), self,
+            activated=self._duplicate_selected_step,
+        )
+        # Ctrl+Z — undo the last structural change.
+        QShortcut(
+            QKeySequence.Undo, self,
+            activated=self._undo,
         )
 
         # Library panel signals
@@ -410,8 +432,42 @@ class MainWindow(QMainWindow):
             {s.id: _trigger_kind_of(s) for s in self._macro.steps}
         )
 
+    def _bundled_examples_dir(self) -> Optional[Path]:
+        """Locate the ``examples/`` directory shipped alongside the package.
+
+        For PyInstaller one-file bundles, ``sys._MEIPASS`` points at the
+        per-launch extraction; for dev installs it sits at the repo root
+        next to the ``keymacro/`` package.
+        """
+        import sys
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            p = Path(meipass) / "examples"
+            if p.is_dir():
+                return p
+        candidate = Path(__file__).resolve().parents[2] / "examples"
+        return candidate if candidate.is_dir() else None
+
+    def _seed_examples_on_first_launch(self) -> bool:
+        """First-time install — register bundled examples in the
+        library so the sidebar isn't empty."""
+        if self._library.entries or self._library.folder_roots:
+            return False
+        examples = self._bundled_examples_dir()
+        if examples is None:
+            return False
+        self._library.add_folder(examples)
+        save_library(self._library)
+        log.info("first launch — seeded examples folder %s", examples)
+        return True
+
     def _reload_step_list(self, select_index: int = 0) -> None:
-        self.list_panel.set_steps(list(self._macro.steps), select_index=select_index)
+        examples_available = self._bundled_examples_dir() is not None
+        self.list_panel.set_steps(
+            list(self._macro.steps),
+            select_index=select_index,
+            show_examples_button=(not self._macro.steps) and examples_available,
+        )
         self._refresh_transport_kind_lookup()
         if self._macro.steps:
             self.form_scroll.setVisible(True)
@@ -422,6 +478,22 @@ class MainWindow(QMainWindow):
         else:
             self.form_scroll.setVisible(False)
         self._update_title()
+
+    def _on_browse_examples(self) -> None:
+        """Open a File-Open dialog rooted in the bundled examples
+        folder so first-time users see what a real macro looks like."""
+        examples = self._bundled_examples_dir()
+        if examples is None:
+            return
+        if not self._confirm_discard():
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "예제 매크로 살펴보기", str(examples),
+            "매크로 YAML (*.yaml *.yml)",
+        )
+        if not path:
+            return
+        self._load_macro_from_path(Path(path))
 
     def _on_step_selected(self, row: int) -> None:
         self.list_panel.set_selected(row)
@@ -444,6 +516,46 @@ class MainWindow(QMainWindow):
             self._refresh_transport_kind_lookup()
             self._update_title()
 
+    # --- undo plumbing --------------------------------------------------
+
+    def _snapshot_macro(self) -> None:
+        """Push the current macro state onto the undo stack.
+
+        Called *before* every structural change. Form-level text edits
+        skip this — too granular and the user wouldn't expect each
+        keystroke to be its own undo point.
+        """
+        try:
+            snap = self._macro.model_dump(mode="json")
+        except Exception:
+            return
+        self._undo_stack.append(snap)
+        if len(self._undo_stack) > self._undo_max:
+            self._undo_stack.pop(0)
+
+    def _undo(self) -> None:
+        if not self._undo_stack:
+            self.statusBar().showMessage("되돌릴 변경 없음", 2500)
+            return
+        snap = self._undo_stack.pop()
+        try:
+            self._macro = Macro.model_validate(snap)
+        except Exception:
+            self.statusBar().showMessage("되돌리기 실패", 3000)
+            return
+        self._dirty = True
+        self._reload_step_list(select_index=0)
+        self.statusBar().showMessage(
+            f"되돌렸어요  · 남은 undo {len(self._undo_stack)}건", 2500,
+        )
+
+    def _duplicate_selected_step(self) -> None:
+        row = self.list_panel.selected_row()
+        if row >= 0:
+            self._on_duplicate_step(row)
+
+    # --- step list edits ------------------------------------------------
+
     def _on_add_step(self) -> None:
         picker = TypePicker(self)
         picker.chosen.connect(self._on_kind_picked)
@@ -457,6 +569,7 @@ class MainWindow(QMainWindow):
             i += 1
             sid = f"step{i + 1}"
         new_step = make_step_for_kind(kind, sid)
+        self._snapshot_macro()
         self._macro.steps.append(new_step)
         self._dirty = True
         self._reload_step_list(select_index=len(self._macro.steps) - 1)
@@ -471,6 +584,7 @@ class MainWindow(QMainWindow):
         )
         if ans != QMessageBox.Yes:
             return
+        self._snapshot_macro()
         self._macro.steps.pop(row)
         self._dirty = True
         self._reload_step_list(select_index=max(0, row - 1))
@@ -486,6 +600,7 @@ class MainWindow(QMainWindow):
             new_id = f"{original.id}_copy{i}"
             i += 1
         copy = original.model_copy(update={"id": new_id})
+        self._snapshot_macro()
         self._macro.steps.insert(row + 1, copy)
         self._dirty = True
         self._reload_step_list(select_index=row + 1)
@@ -495,11 +610,30 @@ class MainWindow(QMainWindow):
         new = idx + delta
         if idx < 0 or new < 0 or new >= len(self._macro.steps):
             return
+        self._snapshot_macro()
         self._macro.steps[idx], self._macro.steps[new] = (
             self._macro.steps[new], self._macro.steps[idx],
         )
         self._dirty = True
         self._reload_step_list(select_index=new)
+
+    def _on_reorder_steps(self, src: int, target: int) -> None:
+        """Drag-drop reorder. ``target`` is the insertion index in the
+        original list (before pop). After popping ``src`` we need to
+        decrement ``target`` by one if it was past the source position,
+        otherwise the destination shifts left by one slot."""
+        n = len(self._macro.steps)
+        if not (0 <= src < n) or not (0 <= target <= n):
+            return
+        if src < target:
+            target -= 1
+        if src == target:
+            return
+        self._snapshot_macro()
+        step = self._macro.steps.pop(src)
+        self._macro.steps.insert(target, step)
+        self._dirty = True
+        self._reload_step_list(select_index=target)
 
     # --- file ops -------------------------------------------------------
 

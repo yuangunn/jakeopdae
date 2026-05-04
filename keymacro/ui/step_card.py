@@ -11,9 +11,10 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QFontMetrics
+from PySide6.QtCore import QMimeData, QSize, Qt, Signal
+from PySide6.QtGui import QDrag, QFontMetrics
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -22,6 +23,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+# Internal mime type for in-process step drag-drop reordering.
+STEP_DRAG_MIME = "application/x-keymacro-step-row"
 
 from ..models import (
     Action,
@@ -214,6 +219,11 @@ class StepCard(QFrame):
     selected = Signal(int)
     delete_requested = Signal(int)
     duplicate_requested = Signal(int)
+    reorder_requested = Signal(int, int)
+    """``(src_row, target_row)`` — fired when the user drops a card here.
+    ``target_row`` is the *insertion* index in the *original* list
+    (before removal of the source); the receiver is expected to do the
+    correct ``pop + insert`` arithmetic itself."""
 
     def __init__(self, step: Step, row: int, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -221,8 +231,10 @@ class StepCard(QFrame):
         self.setProperty("state", "idle")
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         self.setMouseTracking(True)
+        self.setAcceptDrops(True)
         self._row = row
         self._step = step
+        self._drag_start = None
         self._build_ui()
         self._refresh()
 
@@ -355,12 +367,73 @@ class StepCard(QFrame):
         self._badge.style().unpolish(self._badge)
         self._badge.style().polish(self._badge)
 
-    # --- mouse selection ------------------------------------------------
+    # --- mouse selection + drag source ---------------------------------
 
     def mousePressEvent(self, e):  # noqa: N802
         if e.button() == Qt.LeftButton:
             self.selected.emit(self._row)
+            self._drag_start = e.position().toPoint()
         super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):  # noqa: N802
+        if self._drag_start is None or not (e.buttons() & Qt.LeftButton):
+            return super().mouseMoveEvent(e)
+        delta = e.position().toPoint() - self._drag_start
+        if delta.manhattanLength() < QApplication.startDragDistance():
+            return super().mouseMoveEvent(e)
+
+        # Begin drag — payload is the source row index.
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(STEP_DRAG_MIME, str(self._row).encode("utf-8"))
+        drag.setMimeData(mime)
+        # Carry a snapshot of the card itself as the drag pixmap so the
+        # cursor visibly carries "the thing being moved".
+        pix = self.grab()
+        # Half-opacity so the user can see what's underneath.
+        from PySide6.QtCore import Qt as _Qt
+        from PySide6.QtGui import QPainter, QPixmap
+        translucent = QPixmap(pix.size())
+        translucent.fill(_Qt.transparent)
+        p = QPainter(translucent)
+        p.setOpacity(0.6)
+        p.drawPixmap(0, 0, pix)
+        p.end()
+        drag.setPixmap(translucent)
+        drag.setHotSpot(self._drag_start)
+        drag.exec(Qt.MoveAction)
+        self._drag_start = None
+
+    def mouseReleaseEvent(self, e):  # noqa: N802
+        self._drag_start = None
+        super().mouseReleaseEvent(e)
+
+    # --- drop target ----------------------------------------------------
+
+    def dragEnterEvent(self, e):  # noqa: N802
+        if e.mimeData().hasFormat(STEP_DRAG_MIME):
+            e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):  # noqa: N802
+        if e.mimeData().hasFormat(STEP_DRAG_MIME):
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):  # noqa: N802
+        if not e.mimeData().hasFormat(STEP_DRAG_MIME):
+            return
+        try:
+            src = int(bytes(e.mimeData().data(STEP_DRAG_MIME)).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return
+        if src == self._row:
+            return  # no-op: dropped onto self
+        # If the cursor is in the upper half of this card, insert *before*;
+        # bottom half, insert *after*. ``target`` is the index in the
+        # *original* list where the source should land after a pop+insert.
+        y = e.position().y()
+        target = self._row if y < self.height() / 2 else self._row + 1
+        self.reorder_requested.emit(src, target)
+        e.acceptProposedAction()
 
     def resizeEvent(self, e):  # noqa: N802
         super().resizeEvent(e)

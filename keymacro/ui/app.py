@@ -51,6 +51,19 @@ def run_gui(
     load_bundled_fonts()
     apply_theme(app)
     win = MainWindow(debug_capture_dir=debug_capture_dir)
+
+    # Close the PyInstaller splash screen as soon as the main window is
+    # ready to render. Three failure modes to swallow:
+    #   - regular Python:    ``pyi_splash`` doesn't exist (ImportError)
+    #   - PyInstaller without ``Splash``: ``_PYI_SPLASH_IPC`` env var
+    #     missing → module-level KeyError on import
+    #   - splash already closed by the bootloader: RuntimeError
+    try:
+        import pyi_splash  # type: ignore[import-not-found]
+
+        pyi_splash.close()
+    except Exception:
+        pass
     if initial_macro is not None and initial_macro.exists():
         try:
             # Use the same load path as the Open button so the macro lands

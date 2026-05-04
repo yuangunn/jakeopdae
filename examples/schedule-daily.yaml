@@ -1,0 +1,43 @@
+# 예약 트리거 데모 — 평일 매일 9시에 한 번씩 동작.
+#
+# 사용 시나리오:
+#   - 매일 출근 직후 자동으로 그날 일정 열기
+#   - 오후 6시에 매일 보고서 자동 제출
+#   - 밤 11시에 모든 브라우저 탭 정리하기
+#
+# ``keymacro watch examples/schedule-daily.yaml`` 으로 백그라운드 상주
+# 시켜두면 컴퓨터를 켜두는 한 매일 9시에 알아서 발사됩니다.
+
+name: 평일-9시-알림
+description: 평일 매일 09:00에 메모장으로 오늘 할 일 띄우기
+max_total_runtime_s: 90000   # 25시간 — 다음 트리거까지 충분
+
+steps:
+  - id: wait_morning
+    name: 평일 9시까지 대기
+    trigger:
+      type: schedule
+      at: "09:00"
+      weekdays: [0, 1, 2, 3, 4]   # 0=월요일 ... 4=금요일
+      grace_s: 60                  # 정시에서 1분 늦어도 발사
+    action: { type: wait, duration_s: 0 }
+
+  - id: open_notepad
+    name: 메모장 띄우기
+    trigger: { type: time, delay_s: 0.3 }
+    action: { type: key, keys: "win+r" }
+
+  - id: type_notepad
+    trigger: { type: time, delay_s: 0.5 }
+    action: { type: type, text: "notepad" }
+
+  - id: enter
+    trigger: { type: time, delay_s: 0.3 }
+    action: { type: key, keys: enter }
+
+  - id: type_today
+    name: 오늘 할 일 헤더 박기
+    trigger: { type: time, delay_s: 1.5 }
+    action:
+      type: type
+      text: "오늘의 할 일\n=================\n\n"

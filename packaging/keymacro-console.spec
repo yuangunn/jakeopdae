@@ -18,6 +18,9 @@ datas = [
     (str(p), "keymacro/ui/assets/fonts")
     for p in _fonts_dir.glob("*.ttf")
 ]
+_examples_dir = ROOT / "examples"
+for _yaml in _examples_dir.glob("*.yaml"):
+    datas.append((str(_yaml), "examples"))
 datas += collect_data_files("PySide6", includes=["**/translations/*", "**/plugins/**"])
 
 hiddenimports = (
