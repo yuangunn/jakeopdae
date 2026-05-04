@@ -92,6 +92,24 @@ def _build_parser() -> argparse.ArgumentParser:
     gui_p.add_argument("macro", nargs="?", help="optional macro to preload")
     gui_p.add_argument("--debug-capture-dir", type=Path, default=None)
 
+    sc_p = sub.add_parser(
+        "shortcut",
+        help="create desktop shortcut(s) for the GUI and the debug Chrome",
+    )
+    sc_p.add_argument(
+        "--chrome", action="store_true",
+        help="also create a 작업대 Chrome (디버그).lnk",
+    )
+
+    upd_p = sub.add_parser(
+        "check-updates",
+        help="check GitHub releases for a newer version",
+    )
+    upd_p.add_argument(
+        "--repo", default="yuangunn/jakeopdae",
+        help="GitHub repo to query (default: yuangunn/jakeopdae)",
+    )
+
     chrome_p = sub.add_parser(
         "chrome-launch",
         help="launch Chrome with --remote-debugging-port for attach-mode macros",
@@ -276,6 +294,51 @@ def _cmd_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_shortcut(args: argparse.Namespace) -> int:
+    """Drop ``작업대.lnk`` (and optionally a Chrome-debug shortcut) on the
+    user's desktop. Idempotent — re-running just overwrites the existing
+    shortcut(s)."""
+    from .core.shortcut import (
+        create_chrome_debug_shortcut, create_default_shortcut,
+    )
+
+    out = create_default_shortcut()
+    if not out.exists():
+        print(f"바로가기 만들기 실패: {out}", file=sys.stderr)
+        return 1
+    print(f"만들었어요: {out}")
+    if args.chrome:
+        out2 = create_chrome_debug_shortcut()
+        if out2.exists():
+            print(f"만들었어요: {out2}")
+        else:
+            print(f"Chrome 디버그 바로가기 실패", file=sys.stderr)
+    print("\n바탕화면을 새로고침(F5)하면 보입니다.")
+    return 0
+
+
+def _cmd_check_updates(args: argparse.Namespace) -> int:
+    """Compare ``keymacro.__version__`` against the GitHub Releases API
+    and print whether a newer one exists."""
+    from .core.updates import check_for_updates, current_version
+
+    print(f"현재 버전: {current_version()}")
+    info = check_for_updates(args.repo)
+    if info is None:
+        print("업데이트 정보를 가져올 수 없어요. (오프라인 / API 한도 / repo 미존재)")
+        return 2
+    if info.is_newer:
+        print(f"새 버전 있음: {info.latest_tag}")
+        print(f"  → {info.html_url}")
+        if info.assets:
+            print(f"  내려받기 직링크:")
+            for a in info.assets:
+                print(f"    {a['url']}  ({a['size_mb']:.1f} MB)")
+    else:
+        print(f"최신입니다 (latest: {info.latest_tag}).")
+    return 0
+
+
 def _cmd_chrome_launch(args: argparse.Namespace) -> int:
     """Launch Chrome with --remote-debugging-port for attach-mode macros."""
     from .core.chrome_launcher import ensure_chrome_running
@@ -303,6 +366,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         "export": _cmd_export,
         "import": _cmd_import,
         "chrome-launch": _cmd_chrome_launch,
+        "shortcut": _cmd_shortcut,
+        "check-updates": _cmd_check_updates,
     }
     handler = handlers.get(args.cmd)
     if handler is None:

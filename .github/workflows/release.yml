@@ -1,0 +1,101 @@
+name: build & release
+
+# Triggers:
+#   - Push a tag like ``v0.1.1`` → full pipeline (tests → build → upload to release)
+#   - workflow_dispatch                → manual trigger (build artefact only, no release)
+#   - PRs into main                    → tests + build, no upload
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write          # needed for the release upload step
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          # Tag pushes must include enough history for ``git describe`` if we
+          # ever surface a build hash on the about page.
+          fetch-depth: 0
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install package + dev/gui/notify extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,gui,notify]"
+          pip install pyinstaller
+
+      - name: Run pytest
+        run: pytest -q
+
+      - name: Build single-file exe
+        run: pyinstaller packaging/keymacro.spec --clean --noconfirm
+
+      - name: Smoke-test the built exe
+        # ``--help`` exits 0 if the bundled discriminated unions / hidden
+        # imports / Qt plugins all resolved correctly. Cheaper + more
+        # reliable than spawning the GUI in CI (no display server).
+        shell: pwsh
+        run: |
+          $exe = "dist/jakeopdae.exe"
+          & $exe --help | Out-Host
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "exe failed to print --help"; exit 1
+          }
+          $size = (Get-Item $exe).Length / 1MB
+          Write-Host "exe size: $($size.ToString('N1')) MB"
+
+      - name: Upload exe as run artifact
+        # Always uploaded (PR / manual / tag) so reviewers can grab the
+        # binary without waiting for a release.
+        uses: actions/upload-artifact@v4
+        with:
+          name: jakeopdae-exe
+          path: dist/jakeopdae.exe
+          retention-days: 30
+
+  release:
+    needs: build
+    runs-on: windows-latest
+    # Only attach to a release when the build job ran on a tag push.
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    timeout-minutes: 10
+
+    steps:
+      - name: Download exe artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: jakeopdae-exe
+          path: dist
+
+      - name: Create or update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Re-use the tag name (``v0.1.1``) as the release name.
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          # Leave existing release notes alone if a draft already exists.
+          generate_release_notes: false
+          draft: false
+          prerelease: false
+          files: dist/jakeopdae.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

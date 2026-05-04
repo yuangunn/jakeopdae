@@ -104,3 +104,38 @@ exe = EXE(
     entitlements_file=None,
     icon=None,         # add a .ico path here when we have an icon
 )
+
+
+# --- optional code signing --------------------------------------------------
+#
+# When ``KEYMACRO_PFX_PATH`` is set in the environment, sign the freshly
+# built exe with ``signtool``. The hook is a no-op without the env var so
+# normal dev builds aren't affected. See ``docs/CODE_SIGNING.md`` for the
+# full procedure (PFX format, GitHub Actions Secret encoding, EV vs OV).
+
+import os as _os
+import subprocess as _subprocess
+
+_pfx = _os.environ.get("KEYMACRO_PFX_PATH")
+if _pfx:
+    _target = str(ROOT / "dist" / "jakeopdae.exe")
+    _password = _os.environ.get("KEYMACRO_PFX_PASSWORD", "")
+    _ts_url = _os.environ.get(
+        "KEYMACRO_TS_URL", "http://timestamp.sectigo.com",
+    )
+    _cmd = [
+        "signtool", "sign",
+        "/f", _pfx,
+        "/p", _password,
+        "/tr", _ts_url,
+        "/td", "sha256",
+        "/fd", "sha256",
+        _target,
+    ]
+    print("[codesign] signing", _target, "with", _pfx)
+    try:
+        _subprocess.run(_cmd, check=True)
+        print("[codesign] success")
+    except (_subprocess.CalledProcessError, FileNotFoundError) as _e:
+        print(f"[codesign] FAILED: {_e}")
+        # Don't fail the whole build — operators can re-sign offline.

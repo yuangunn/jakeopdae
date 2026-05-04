@@ -3,6 +3,12 @@
 > 매크로 자동화 데스크탑 도구 — 따뜻한 흑연 + 황동 한 점.
 > Python 패키지 이름: `keymacro`
 
+[![tests](https://github.com/yuangunn/jakeopdae/actions/workflows/release.yml/badge.svg)](https://github.com/yuangunn/jakeopdae/actions)
+[![release](https://img.shields.io/github/v/release/yuangunn/jakeopdae)](https://github.com/yuangunn/jakeopdae/releases/latest)
+[![python](https://img.shields.io/badge/python-3.12+-blue)](https://www.python.org)
+
+![main window](docs/screenshots/01-main-window.png)
+
 KeyMacro 같은 픽셀 매크로의 직관성과 Playwright 같은 DOM 자동화의 안정성을
 한 화면에 모았습니다. 비개발자도 *클릭으로 시연 → 매크로 자동 생성*이 가능하고,
 필요할 때만 디버그 모드 Chrome에 attach해서 정확한 셀렉터를 잡습니다.
