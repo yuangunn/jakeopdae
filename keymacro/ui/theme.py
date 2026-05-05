@@ -585,6 +585,38 @@ QFormLayout QLabel {{
     font-size: 11px;
     font-weight: 600;
 }}
+
+/* === toasts (top-right floating notifications) ======================= */
+
+QWidget[role="toast"] {{
+    background-color: {C['surface-container-high']};
+    border: 1px solid {C['outline-variant']};
+    border-radius: {R['md']}px;
+}}
+QWidget[role="toast"][kind="success"] {{
+    border-left: 3px solid {C['tertiary']};
+}}
+QWidget[role="toast"][kind="info"] {{
+    border-left: 3px solid {C['secondary']};
+}}
+QWidget[role="toast"][kind="warning"] {{
+    border-left: 3px solid {C['primary']};
+}}
+QWidget[role="toast"][kind="error"] {{
+    border-left: 3px solid {C['quaternary']};
+}}
+QWidget[role="toast"] QPushButton#toastClose {{
+    color: {C['on-surface-variant']};
+    background-color: transparent;
+    border: none;
+    font-size: 14px;
+    font-weight: 700;
+}}
+QWidget[role="toast"] QPushButton#toastClose:hover {{
+    color: {C['on-surface']};
+    background-color: {C['surface-container-highest']};
+    border-radius: {R['sm']}px;
+}}
 """
 
 

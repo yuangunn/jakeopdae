@@ -61,6 +61,7 @@ from .step_form import StepForm
 from .step_list_panel import StepListPanel
 from .template_capture import capture_template
 from .theme import C, apply_theme
+from .toast import ToastManager
 from .transport_bar import TransportBar
 from .tray import TrayIcon
 from .type_picker import TypePicker, make_step_for_kind
@@ -159,6 +160,15 @@ class MainWindow(QMainWindow):
         # Persistent run history — every Runner invocation is mirrored.
         self._history = HistoryStore(default_history_path())
 
+        # In-memory cache of the most recent failure screenshot per
+        # ``step_id`` — fed by the runner's ``on_failure_capture`` callback.
+        # When a step fails, the StepCard exposes a "📷 실패 화면" mini-button
+        # that opens FailurePreviewDialog with this ndarray.
+        self._failure_captures: dict[str, "object"] = {}
+        # Last error string per step_id, mirroring _failure_captures so
+        # the preview dialog can show "왜 실패했는지" right above the image.
+        self._failure_errors: dict[str, str] = {}
+
         # Recorder lives outside the runner stack — it can be on any time.
         self._recorder_ctrl = RecorderController(self)
         self._recorder_ctrl.stopped_externally.connect(
@@ -170,6 +180,9 @@ class MainWindow(QMainWindow):
         self._wire_signals()
         self._setup_hotkeys()
         self._setup_tray()
+        # Toast manager — top-right floating notifications. Created AFTER
+        # the central widget so it parents to the visible window region.
+        self._toast = ToastManager(self)
         self._reload_step_list()
 
     def showEvent(self, event):  # noqa: N802
@@ -181,6 +194,30 @@ class MainWindow(QMainWindow):
             fg = self.frameGeometry()
             fg.moveCenter(geo.center())
             self.move(fg.topLeft())
+
+    def resizeEvent(self, event):  # noqa: N802 — Qt override
+        super().resizeEvent(event)
+        # Re-anchor any active toasts to the new top-right corner.
+        if hasattr(self, "_toast"):
+            self._toast.reposition()
+
+    # --- toast helpers --------------------------------------------------
+
+    def _toast_info(self, message: str) -> None:
+        if hasattr(self, "_toast"):
+            self._toast.info(message)
+
+    def _toast_success(self, message: str) -> None:
+        if hasattr(self, "_toast"):
+            self._toast.success(message)
+
+    def _toast_warning(self, message: str) -> None:
+        if hasattr(self, "_toast"):
+            self._toast.warning(message)
+
+    def _toast_error(self, message: str) -> None:
+        if hasattr(self, "_toast"):
+            self._toast.error(message)
 
     # --- UI assembly ----------------------------------------------------
 
@@ -341,7 +378,7 @@ class MainWindow(QMainWindow):
     def _on_chrome_launch_clicked(self) -> None:
         ok, msg = ensure_chrome_running()
         if ok:
-            self.statusBar().showMessage(msg, 6000)
+            self._toast_success(msg)
         else:
             QMessageBox.warning(self, "Chrome 시작 실패", msg)
         self._refresh_chrome_status()
@@ -358,6 +395,7 @@ class MainWindow(QMainWindow):
         self.list_panel.selected.connect(self._on_step_selected)
         self.list_panel.delete_requested.connect(self._on_remove_step)
         self.list_panel.duplicate_requested.connect(self._on_duplicate_step)
+        self.list_panel.test_requested.connect(self._on_test_step)
         self.list_panel.move_up_requested.connect(lambda r: self._move_step(-1))
         self.list_panel.move_down_requested.connect(lambda r: self._move_step(+1))
         self.list_panel.reorder_requested.connect(self._on_reorder_steps)
@@ -378,7 +416,9 @@ class MainWindow(QMainWindow):
         self._observer.match_attempt.connect(self.transport.set_match)
         self._observer.step_started.connect(self._on_step_started)
         self._observer.step_ended.connect(self._on_step_ended)
+        self._observer.failure_capture.connect(self._on_failure_capture)
         self._observer.run_ended.connect(self._on_run_ended)
+        self.list_panel.preview_failure_requested.connect(self._on_preview_failure)
 
         QShortcut(QKeySequence.Save, self, activated=self._on_save)
         QShortcut(QKeySequence.New, self, activated=self._on_new)
@@ -469,6 +509,7 @@ class MainWindow(QMainWindow):
             show_examples_button=(not self._macro.steps) and examples_available,
         )
         self._refresh_transport_kind_lookup()
+        self._refresh_preflight_issues()
         if self._macro.steps:
             self.form_scroll.setVisible(True)
             self.form.load_step(self._macro.steps[
@@ -478,6 +519,19 @@ class MainWindow(QMainWindow):
         else:
             self.form_scroll.setVisible(False)
         self._update_title()
+
+    def _refresh_preflight_issues(self) -> None:
+        """Re-run the static lint and push results into the cards.
+
+        Called after every structural change (add/remove/reorder/edit)
+        so the badges stay current. Cheap — pure-Python walk over a list
+        of Pydantic models, optional template-existence ``stat`` per
+        ImageTrigger. No screen capture, no Qt repaint storm.
+        """
+        from ..core.preflight import lint_macro, issues_by_step
+        macro_dir = self._macro_path.parent if self._macro_path else None
+        issues = lint_macro(self._macro, macro_dir)
+        self.list_panel.set_issues(issues_by_step(issues))
 
     def _on_browse_examples(self) -> None:
         """Open a File-Open dialog rooted in the bundled examples
@@ -514,6 +568,7 @@ class MainWindow(QMainWindow):
             self._dirty = True
             self.list_panel.update_step(idx, new_step)
             self._refresh_transport_kind_lookup()
+            self._refresh_preflight_issues()
             self._update_title()
 
     # --- undo plumbing --------------------------------------------------
@@ -535,18 +590,18 @@ class MainWindow(QMainWindow):
 
     def _undo(self) -> None:
         if not self._undo_stack:
-            self.statusBar().showMessage("되돌릴 변경 없음", 2500)
+            self._toast_info("되돌릴 변경이 없어요")
             return
         snap = self._undo_stack.pop()
         try:
             self._macro = Macro.model_validate(snap)
         except Exception:
-            self.statusBar().showMessage("되돌리기 실패", 3000)
+            self._toast_error("되돌리기 실패")
             return
         self._dirty = True
         self._reload_step_list(select_index=0)
-        self.statusBar().showMessage(
-            f"되돌렸어요  · 남은 undo {len(self._undo_stack)}건", 2500,
+        self._toast_success(
+            f"되돌렸어요  ·  남은 undo {len(self._undo_stack)}건",
         )
 
     def _duplicate_selected_step(self) -> None:
@@ -695,7 +750,7 @@ class MainWindow(QMainWindow):
         self.library_panel.set_library(self._library)
         self.library_panel.set_active(str(self._macro_path))
         self._update_title()
-        self.statusBar().showMessage("저장됨", 3000)
+        self._toast_success(f"저장됨 · {self._macro_path.name}")
 
     def _on_save_as(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -723,7 +778,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "내보내기 실패", str(e))
             return
-        self.statusBar().showMessage(f"내보냄 → {target}", 5000)
+        self._toast_success(f"내보냄  ·  {Path(target).name}")
 
     def _on_import(self) -> None:
         if not self._confirm_discard():
@@ -826,7 +881,7 @@ class MainWindow(QMainWindow):
 
     def _on_pick_web_selector(self, field_key: str) -> None:
         if self._picker_thread is not None and self._picker_thread.isRunning():
-            self.statusBar().showMessage("이미 요소를 고르는 중이에요.", 4000)
+            self._toast_warning("이미 요소를 고르는 중이에요")
             return
         config = self._macro.web_session or WebSessionConfig()
         self._picker_field = field_key
@@ -834,18 +889,18 @@ class MainWindow(QMainWindow):
         self._picker_thread.picked.connect(self._on_picker_picked)
         self._picker_thread.failed.connect(self._on_picker_failed)
         self._picker_thread.finished.connect(self._cleanup_picker)
-        self.statusBar().showMessage(
-            "Chrome 탭에서 원하는 요소를 클릭하세요 — Esc로 취소", 0,
+        self._toast_info(
+            "Chrome 탭에서 원하는 요소를 클릭하세요 — Esc로 취소",
         )
         self._picker_thread.start()
 
     def _on_picker_picked(self, selector: str) -> None:
         if not selector:
-            self.statusBar().showMessage("선택 취소됨", 3000)
+            self._toast_info("선택 취소됨")
             return
         if self._picker_field:
             self.form.set_web_selector(self._picker_field, selector)
-        self.statusBar().showMessage(f"셀렉터 설정: {selector}", 6000)
+        self._toast_success(f"셀렉터 설정: {selector}")
 
     def _on_picker_failed(self, message: str) -> None:
         # If the failure is the standard CDP attach error, offer to auto-launch
@@ -870,7 +925,7 @@ class MainWindow(QMainWindow):
         box.exec()
         if box.clickedButton() is not launch_btn:
             return
-        self.statusBar().showMessage("Chrome 시작 중…", 0)
+        self._toast_info("Chrome 시작 중…")
         ok, msg = ensure_chrome_running()
         self._refresh_chrome_status()
         if not ok:
@@ -928,7 +983,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "캡처 실패", str(e))
             return
         self.form.set_template(rel)
-        self.statusBar().showMessage(f"템플릿 저장됨 → {rel}", 5000)
+        self._toast_success(f"템플릿 저장됨 → {rel}")
 
     # --- run lifecycle --------------------------------------------------
 
@@ -958,6 +1013,53 @@ class MainWindow(QMainWindow):
         self.status_pill.set_state("running", "실행 중")
         self._runner_thread.start()
 
+    def _on_test_step(self, row: int) -> None:
+        """Run *only* one step in isolation. Useful for verifying a
+        trigger/action pair while authoring without re-running the
+        whole macro from the top.
+
+        We build an ad-hoc one-step ``Macro`` so the standard Runner
+        machinery applies (templates resolve, observer fires, history
+        records the run as a normal but tiny one). The original
+        macro's name is suffixed with ``[테스트: <step_id>]`` so the
+        run shows up in 이력 with a clear label.
+        """
+        if self._runner_thread is not None and self._runner_thread.isRunning():
+            self._toast_warning("이미 매크로가 실행 중이에요")
+            return
+        if not (0 <= row < len(self._macro.steps)):
+            return
+        step = self._macro.steps[row]
+        if self._macro_path is None:
+            QMessageBox.warning(
+                self, "단일 실행",
+                "먼저 매크로를 저장해 주세요. 그래야 템플릿 경로가 정확히 풀려요.",
+            )
+            return
+        # Strip on_success_goto so the test doesn't try to chain to a
+        # step that won't exist in the one-step macro.
+        test_step = step.model_copy(update={
+            "on_success_goto": None,
+            "repeat": 1,
+        })
+        test_macro = self._macro.model_copy(update={
+            "name": f"{self._macro.name} [테스트: {step.id}]",
+            "steps": [test_step],
+            # Keep the same web_session so CDP-attached actions work.
+        })
+        self._refresh_transport_kind_lookup()
+        self._control.reset()
+        combined = MultiObserver(self._observer, self._history.observer())
+        self._runner_thread = RunnerThread(
+            test_macro, self._macro_path.parent,
+            self._control, combined, self._debug_capture_dir,
+        )
+        self._runner_thread.finished_with_result.connect(self._on_thread_done)
+        self.transport.set_running(True)
+        self.status_pill.set_state("running", f"테스트 · {step.id}")
+        self._toast_info(f"단계 '{step.id}' 만 단독 실행 중…")
+        self._runner_thread.start()
+
     def _on_stop(self) -> None:
         if self._runner_thread is None:
             return
@@ -981,18 +1083,69 @@ class MainWindow(QMainWindow):
     def _on_step_started(self, step_id: str, attempt: int, iteration: int) -> None:
         for i, s in enumerate(self._macro.steps):
             self.list_panel.set_step_state(i, active=(s.id == step_id))
+        # New attempt → drop any stale capture/error so the preview button
+        # only refers to *this* run's failure, not last week's.
+        self._failure_captures.pop(step_id, None)
+        self._failure_errors.pop(step_id, None)
+        for i, s in enumerate(self._macro.steps):
+            if s.id == step_id:
+                self.list_panel.set_step_failure(i, has_capture=False)
+                break
         self.statusBar().showMessage(
             f"단계 {step_id} · 시도 {attempt} · 반복 {iteration + 1}", 0
         )
 
     def _on_step_ended(self, step_id: str, success: bool, error: str) -> None:
         if not success:
-            self.statusBar().showMessage(f"단계 {step_id} 실패: {error}", 6000)
+            self._toast_error(f"단계 {step_id} 실패 · {error}")
+            self._failure_errors[step_id] = error or ""
+            # Re-paint the card error state so the "📷 실패 화면" button
+            # appears now that we know there's a failure to inspect.
+            for i, s in enumerate(self._macro.steps):
+                if s.id == step_id:
+                    has_cap = step_id in self._failure_captures
+                    self.list_panel.set_step_failure(i, has_capture=has_cap)
+                    break
+
+    def _on_failure_capture(self, step_id: str, image) -> None:
+        """Cache the failure ndarray so the StepCard can pop a preview
+        without going to disk. Called from QtRunObserver in the GUI thread,
+        so direct dict mutation is safe.
+
+        Stores even tiny placeholder arrays — :class:`FailurePreviewDialog`
+        filters those out and shows a friendly explanation instead of an
+        empty pixmap, which is friendlier than silently dropping the
+        button entirely.
+        """
+        self._failure_captures[step_id] = image
+        for i, s in enumerate(self._macro.steps):
+            if s.id == step_id:
+                self.list_panel.set_step_failure(i, has_capture=True)
+                break
+
+    def _on_preview_failure(self, row: int) -> None:
+        if not (0 <= row < len(self._macro.steps)):
+            return
+        step = self._macro.steps[row]
+        image = self._failure_captures.get(step.id)
+        if image is None:
+            self._toast_warning("아직 실패 캡처가 없어요 — 한 번 실행한 뒤 다시 시도하세요")
+            return
+        from .failure_preview import FailurePreviewDialog
+        dlg = FailurePreviewDialog(
+            step.id, image,
+            message=self._failure_errors.get(step.id, ""),
+            parent=self,
+        )
+        dlg.show()  # modeless so the user can edit while comparing
 
     def _on_run_ended(self, completed: bool, aborted_at: str) -> None:
-        msg = "완료" if completed else f"{aborted_at} 에서 중단됨"
-        self.statusBar().showMessage(f"실행 {msg}", 8000)
+        if completed:
+            self._toast_success("실행 완료")
+        else:
+            self._toast_warning(f"중단됨 · {aborted_at}")
         try:
+            msg = "완료" if completed else f"{aborted_at} 에서 중단됨"
             self._tray.notify("작업대 · keymacro", f"실행 {msg}")
         except Exception:
             pass
@@ -1045,9 +1198,8 @@ class MainWindow(QMainWindow):
         self._macro_path = None
         self._dirty = True
         self._reload_step_list()
-        self.statusBar().showMessage(
-            f"녹화 완료 — {len(macro.steps)}개 단계. [저장]으로 파일에 저장하세요.",
-            8000,
+        self._toast_success(
+            f"녹화 완료 · 단계 {len(macro.steps)}개 — [저장] 으로 파일에 저장하세요",
         )
 
     # --- history dashboard ----------------------------------------------

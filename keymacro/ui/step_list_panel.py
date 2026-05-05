@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..core.preflight import StepIssue
 from ..models import Step
 from .empty_state import EmptyState
 from .step_card import StepCard
@@ -26,6 +27,10 @@ class StepListPanel(QWidget):
     selected = Signal(int)
     delete_requested = Signal(int)
     duplicate_requested = Signal(int)
+    test_requested = Signal(int)
+    """Fired when the user picks "이 단계만 테스트" from a card's
+    right-click menu. Forwarded to MainWindow which spawns a one-step
+    ad-hoc run."""
     move_up_requested = Signal(int)
     move_down_requested = Signal(int)
     reorder_requested = Signal(int, int)
@@ -33,6 +38,8 @@ class StepListPanel(QWidget):
     indices to do the correct ``pop + insert``."""
     examples_requested = Signal()
     """Fired when the empty-state's "📚 예제 살펴보기" button is clicked."""
+    preview_failure_requested = Signal(int)
+    """Fired when the user clicks "📷 실패 화면" on an errored card."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -127,6 +134,8 @@ class StepListPanel(QWidget):
             card.selected.connect(self.selected)
             card.delete_requested.connect(self.delete_requested)
             card.duplicate_requested.connect(self.duplicate_requested)
+            card.test_requested.connect(self.test_requested)
+            card.preview_failure_requested.connect(self.preview_failure_requested)
             card.reorder_requested.connect(self.reorder_requested)
             self._cards.append(card)
             self._inner_layout.insertWidget(self._inner_layout.count() - 1, card)
@@ -149,6 +158,23 @@ class StepListPanel(QWidget):
                 self._cards[row].set_error(True)
             else:
                 self._cards[row].set_active(active)
+
+    def set_issues(self, issues_by_id: dict[str, list[StepIssue]]) -> None:
+        """Push preflight-lint results down to every card.
+
+        Cards keyed by their step's ``id``; cards not in the dict get
+        an empty list (clears stale badges)."""
+        for card in self._cards:
+            card.set_issues(issues_by_id.get(card._step.id, []))
+
+    def set_step_failure(self, row: int, *, has_capture: bool) -> None:
+        """Toggle the error state + capture-preview button on a card.
+
+        Called from MainWindow when the runner's ``failure_capture``
+        signal fires (we know there's an image to show), or when a fresh
+        attempt starts (we're clearing stale state)."""
+        if 0 <= row < len(self._cards):
+            self._cards[row].set_error(has_capture, with_capture=has_capture)
 
     def selected_row(self) -> int:
         return self._selected_row

@@ -11,13 +11,14 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QMimeData, QSize, Qt, Signal
-from PySide6.QtGui import QDrag, QFontMetrics
+from PySide6.QtCore import QMimeData, QPoint, QSize, Qt, Signal
+from PySide6.QtGui import QAction, QDrag, QFontMetrics
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
 # Internal mime type for in-process step drag-drop reordering.
 STEP_DRAG_MIME = "application/x-keymacro-step-row"
 
+from ..core.preflight import StepIssue
 from ..models import (
     Action,
     ClickAction,
@@ -219,6 +221,12 @@ class StepCard(QFrame):
     selected = Signal(int)
     delete_requested = Signal(int)
     duplicate_requested = Signal(int)
+    test_requested = Signal(int)
+    """Fired when the user picks "이 단계만 테스트" from the right-click
+    menu. Host runs an ad-hoc one-step Macro using the same Runner."""
+    preview_failure_requested = Signal(int)
+    """Fired when the user clicks the "📷 실패 화면" mini-button on an
+    errored card. Host opens FailurePreviewDialog with the cached image."""
     reorder_requested = Signal(int, int)
     """``(src_row, target_row)`` — fired when the user drops a card here.
     ``target_row`` is the *insertion* index in the *original* list
@@ -232,6 +240,11 @@ class StepCard(QFrame):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
+        # Right-click context menu — adds "이 단계만 테스트" beside
+        # the existing 복제/삭제 buttons. Custom signal-driven so the
+        # host owns the actual run logic.
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context_menu)
         self._row = row
         self._step = step
         self._drag_start = None
@@ -251,9 +264,56 @@ class StepCard(QFrame):
         self._stripe.set_active(active)
         self._reapply_style()
 
-    def set_error(self, error: bool) -> None:
+    def set_error(self, error: bool, *, with_capture: bool = False) -> None:
         self.setProperty("state", "error" if error else "idle")
+        # Surface the inline preview button only when we actually have a
+        # cached image to show — otherwise the button is just noise.
+        self._preview_btn.setVisible(error and with_capture)
         self._reapply_style()
+
+    def set_issues(self, issues: list[StepIssue]) -> None:
+        """Populate the inline preflight badges. Pass ``[]`` to clear.
+
+        Each chip carries the short ``label`` and a tooltip with the
+        full ``detail`` sentence. Severity drives colour:
+        error → rose ``error`` token, warning → brass ``primary`` token.
+        """
+        # Drop the previous chips before adding new ones — chip count
+        # varies between calls so we re-build rather than diff.
+        for w in self._issue_widgets:
+            self._issue_row.removeWidget(w)
+            w.deleteLater()
+        self._issue_widgets.clear()
+
+        for issue in issues:
+            chip = QLabel(("⛔  " if issue.severity == "error" else "⚠  ") + issue.label)
+            colour = C["error"] if issue.severity == "error" else C["primary"]
+            bg = (
+                "rgba(217, 132, 124, 0.12)"
+                if issue.severity == "error"
+                else "rgba(232, 178, 106, 0.12)"
+            )
+            chip.setStyleSheet(
+                f"color: {colour}; background-color: {bg};"
+                f"border: 1px solid {colour}; border-radius: 4px;"
+                f"padding: 1px 6px; font-size: 10px; font-weight: 700;"
+            )
+            chip.setToolTip(issue.detail)
+            self._issue_row.addWidget(chip)
+            self._issue_widgets.append(chip)
+
+        # The error border on the card itself only kicks in for errors,
+        # not warnings (warnings are advisory). Don't overwrite the
+        # 'active' / runtime-error state when the card is currently
+        # selected.
+        has_error = any(i.severity == "error" for i in issues)
+        current = self.property("state")
+        if current not in ("active", "error"):
+            # idle → preflight-error is fine; error (runtime) wins.
+            self.setProperty(
+                "state", "error" if has_error else "idle",
+            )
+            self._reapply_style()
 
     # --- assembly -------------------------------------------------------
 
@@ -292,6 +352,20 @@ class StepCard(QFrame):
         )
         top.addWidget(self._title_lbl, 1)
 
+        # Hidden by default — toggled visible only when ``set_error(error,
+        # with_capture=True)`` runs after the runner emits failure_capture.
+        self._preview_btn = QPushButton("📷 실패 화면")
+        self._preview_btn.setProperty("role", "icon-mini")
+        self._preview_btn.setCursor(Qt.PointingHandCursor)
+        self._preview_btn.setToolTip(
+            "마지막 실패 시 매크로가 본 화면 보기 — 영역/템플릿 조정에 도움이 돼요",
+        )
+        self._preview_btn.clicked.connect(
+            lambda: self.preview_failure_requested.emit(self._row)
+        )
+        self._preview_btn.setVisible(False)
+        top.addWidget(self._preview_btn)
+
         self._dup_btn = QPushButton("복제")
         self._dup_btn.setProperty("role", "icon-mini")
         self._dup_btn.setCursor(Qt.PointingHandCursor)
@@ -324,6 +398,16 @@ class StepCard(QFrame):
         bottom_row.addWidget(self._action_lbl, 1)
         self._meta_row = bottom_row
         body_l.addLayout(bottom_row)
+
+        # Inline preflight issue chips — populated by ``set_issues()``.
+        # Hidden by default so the card height doesn't bounce on every
+        # add. Lives below the action sentence so long Korean error
+        # detail can wrap without squeezing the trigger summary.
+        self._issue_row = QHBoxLayout()
+        self._issue_row.setSpacing(4)
+        self._issue_row.setContentsMargins(0, 2, 0, 0)
+        self._issue_widgets: list[QLabel] = []
+        body_l.addLayout(self._issue_row)
 
         layout.addWidget(body)
 
@@ -454,3 +538,24 @@ class StepCard(QFrame):
     def sizeHint(self) -> QSize:  # noqa: N802
         s = super().sizeHint()
         return QSize(s.width(), max(s.height(), 76))
+
+    # --- context menu ---------------------------------------------------
+
+    def _on_context_menu(self, pos: QPoint) -> None:
+        menu = QMenu(self)
+        # The card emits ``selected`` first so the form switches to this
+        # step before the action runs — feels less surprising than
+        # running a step you can't see.
+        self.selected.emit(self._row)
+
+        act_test = QAction("▶  이 단계만 테스트", self)
+        act_test.triggered.connect(lambda: self.test_requested.emit(self._row))
+        menu.addAction(act_test)
+        menu.addSeparator()
+        act_dup = QAction("복제 (Ctrl+D)", self)
+        act_dup.triggered.connect(lambda: self.duplicate_requested.emit(self._row))
+        menu.addAction(act_dup)
+        act_del = QAction("삭제", self)
+        act_del.triggered.connect(lambda: self.delete_requested.emit(self._row))
+        menu.addAction(act_del)
+        menu.exec(self.mapToGlobal(pos))
