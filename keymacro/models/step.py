@@ -28,6 +28,12 @@ class Step(BaseModel):
     on_failure: Literal["abort", "skip", "retry"] = "abort"
     retry_count: int = 0
     on_success_goto: Optional[str] = None
+    on_failure_goto: Optional[str] = None
+    """Together with ``on_failure='skip'``, lets the macro branch on
+    trigger timeouts or action errors. Example: a step that watches for
+    "이미 로그인됨" — if it succeeds, ``on_success_goto: dashboard``;
+    if it times out (i.e. user is logged out), the runner advances to
+    the next step which begins the login flow."""
     repeat: int = 1
 
     @field_validator("id")

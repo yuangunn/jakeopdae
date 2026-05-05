@@ -86,9 +86,8 @@ def lint_macro(macro: Macro, macro_dir: Optional[Path]) -> list[StepIssue]:
         issues.extend(_lint_trigger(step, macro_dir))
         # Action checks
         issues.extend(_lint_action(step))
-        # Goto target validity (Step only has on_success_goto today;
-        # if on_failure_goto is added later, just extend the tuple).
-        for attr, kind in (("on_success_goto", "성공"),):
+        # Goto target validity — both branches are validated.
+        for attr, kind in (("on_success_goto", "성공"), ("on_failure_goto", "실패")):
             target = getattr(step, attr, None)
             if target and target not in valid_ids:
                 issues.append(StepIssue(

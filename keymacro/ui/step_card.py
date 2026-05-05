@@ -32,9 +32,12 @@ STEP_DRAG_MIME = "application/x-keymacro-step-row"
 from ..core.preflight import StepIssue
 from ..models import (
     Action,
+    CallMacroAction,
     ClickAction,
+    ClipboardAction,
     DragAction,
     ExtractTextAction,
+    HttpAction,
     HybridImageTrigger,
     ImageTrigger,
     KeyAction,
@@ -169,6 +172,21 @@ def action_sentence(action: Action) -> str:
             f"→ ({r.x}, {r.y}) ~ ({r.x + r.w}, {r.y + r.h}) 영역의 텍스트를 "
             f"읽어 ${{{action.variable}}} 에 저장한다"
         )
+    if isinstance(action, ClipboardAction):
+        if action.op == "copy":
+            return f"→ 선택 영역을 복사 (Ctrl+C) 해서 ${{{action.variable}}} 에 저장"
+        if action.op == "paste":
+            return "→ 클립보드 내용 붙여넣기 (Ctrl+V)"
+        # set
+        text = action.text if len(action.text) <= 22 else action.text[:22] + "…"
+        return f"→ 클립보드에 \"{text}\" 쓰기"
+    if isinstance(action, HttpAction):
+        url = action.url if len(action.url) <= 32 else action.url[:32] + "…"
+        store = f" → ${{{action.store_in}}}" if action.store_in else ""
+        return f"→ {action.method} {url}{store}"
+    if isinstance(action, CallMacroAction):
+        path = action.path if len(action.path) <= 36 else "…" + action.path[-32:]
+        return f"→ 다른 매크로 실행: {path}"
     return "→ (알 수 없는 동작)"
 
 
@@ -181,7 +199,9 @@ def _meta_tags(step: Step) -> list[str]:
     elif step.on_failure == "retry":
         out.append(f"재시도 {step.retry_count}")
     if step.on_success_goto:
-        out.append(f"→ {step.on_success_goto}")
+        out.append(f"성공→{step.on_success_goto}")
+    if step.on_failure_goto:
+        out.append(f"실패→{step.on_failure_goto}")
     return out
 
 

@@ -41,6 +41,9 @@ _TILES: list[tuple[StepKind, str, str, str]] = [
     ("ocr_text", "🔤", "화면에서 텍스트가 보이면", "OCR로 영역 안의 글자를 읽어 매칭 (Tesseract 필요)"),
     ("extract_text", "📝", "텍스트 추출 → 변수", "OCR 결과를 ${var}에 저장. 다음 단계에서 ${var}로 참조"),
     ("schedule", "📅", "예약: 평일 9시 같은 시각에", "주중/주말, 매일, HH:MM 단위로 예약 실행"),
+    ("clipboard", "📋", "클립보드 복사/붙여넣기", "Ctrl+C/V 또는 텍스트를 클립보드에 직접 쓰기"),
+    ("http_request", "📡", "HTTP 요청 보내기", "GET/POST 등으로 외부 서버 호출 (웹훅, n8n, 자체 API)"),
+    ("call_macro", "🔁", "다른 매크로 실행하기", "공통 로그인/사전 작업을 별도 yaml로 빼고 여기서 호출"),
 ]
 
 
@@ -125,11 +128,11 @@ class TypePicker(QDialog):
 def make_step_for_kind(kind: str, step_id: str):
     """Translate the picker's choice into a default Step instance."""
     from ..models import (
-        ClickAction, ExtractTextAction, HybridImageTrigger, KeyAction,
-        OcrTextTrigger, PixelColorTrigger, Region, ScheduleTrigger,
-        Step, TimeTrigger, TypeAction, WaitAction, ImageTrigger,
-        WebClickAction, WebElementVisibleTrigger, WebNavigateAction,
-        WebUrlTrigger,
+        CallMacroAction, ClickAction, ClipboardAction, ExtractTextAction,
+        HttpAction, HybridImageTrigger, KeyAction, OcrTextTrigger,
+        PixelColorTrigger, Region, ScheduleTrigger, Step, TimeTrigger,
+        TypeAction, WaitAction, ImageTrigger, WebClickAction,
+        WebElementVisibleTrigger, WebNavigateAction, WebUrlTrigger,
     )
     name_map = {
         "image_click": "이미지가 보이면 클릭",
@@ -145,6 +148,9 @@ def make_step_for_kind(kind: str, step_id: str):
         "ocr_text": "텍스트가 보이면 동작",
         "extract_text": "텍스트 추출",
         "schedule": "예약 실행",
+        "clipboard": "클립보드",
+        "http_request": "HTTP 요청",
+        "call_macro": "다른 매크로 호출",
     }
     if kind == "image_click":
         return Step(
@@ -235,6 +241,29 @@ def make_step_for_kind(kind: str, step_id: str):
                 variable="otp",
                 language="kor+eng",
             ),
+        )
+    if kind == "clipboard":
+        return Step(
+            id=step_id, name=name_map[kind],
+            trigger=TimeTrigger(delay_s=0.0),
+            action=ClipboardAction(op="paste"),
+        )
+    if kind == "http_request":
+        return Step(
+            id=step_id, name=name_map[kind],
+            trigger=TimeTrigger(delay_s=0.0),
+            action=HttpAction(
+                url="https://example.com/webhook",
+                method="POST",
+                headers={"Content-Type": "application/json"},
+                body='{"event":"macro_done"}',
+            ),
+        )
+    if kind == "call_macro":
+        return Step(
+            id=step_id, name=name_map[kind],
+            trigger=TimeTrigger(delay_s=0.0),
+            action=CallMacroAction(path="shared/login.yaml"),
         )
     # schedule
     return Step(

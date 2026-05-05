@@ -29,8 +29,11 @@ import numpy as np
 
 from ..models.action import (
     Action,
+    CallMacroAction,
     ClickAction,
+    ClipboardAction,
     DragAction,
+    HttpAction,
     KeyAction,
     TypeAction,
     WaitAction,
@@ -147,6 +150,10 @@ class Runner:
         # ExtractTextAction. Available to every action's string fields
         # via ``${name}`` substitution.
         self._vars: dict[str, str] = dict(macro.variables or {})
+        # Active sub-macro call chain — resolved-path strings. Pushed
+        # before ``CallMacroAction`` recurses, popped after. Used to
+        # break a → b → a accidents without blowing the stack.
+        self._call_chain: list[str] = []
 
     # --- lazy dependency construction -----------------------------------------
 
@@ -229,6 +236,11 @@ class Runner:
                         f"step {s.id!r} has on_success_goto={s.on_success_goto!r} "
                         "which does not exist"
                     )
+                if s.on_failure_goto and s.on_failure_goto not in steps_by_id:
+                    raise ValueError(
+                        f"step {s.id!r} has on_failure_goto={s.on_failure_goto!r} "
+                        "which does not exist"
+                    )
 
             run_start = self._clock()
             current_id: Optional[str] = self.macro.steps[0].id
@@ -254,6 +266,16 @@ class Runner:
 
                 if sr.success:
                     current_id = step.on_success_goto or self._next_id(step)
+                    continue
+
+                # Failure path. ``on_failure_goto`` (when set) overrides
+                # the default skip/abort behaviour — the step counts as
+                # failed but the run jumps to the named branch instead
+                # of advancing or aborting. Lets users build "if image
+                # visible → A; else → B" patterns without an extra
+                # marker step.
+                if step.on_failure_goto:
+                    current_id = step.on_failure_goto
                     continue
 
                 if step.on_failure == "skip":
@@ -712,6 +734,68 @@ class Runner:
             )
             return
 
+        if isinstance(action, CallMacroAction):
+            self._call_sub_macro(action)
+            return
+
+        if isinstance(action, HttpAction):
+            from . import http_client
+            # Substitute ${var} in URL, body, and every header value so
+            # webhooks can carry runtime data: e.g. POST a JSON body
+            # containing the captured OTP, or hit /done?run=${run_id}.
+            try:
+                resp_text = http_client.request(
+                    action.method,
+                    self._sub(action.url),
+                    headers={k: self._sub(v) for k, v in action.headers.items()},
+                    body=self._sub(action.body),
+                    timeout_s=action.timeout_s,
+                )
+            except http_client.HttpError as e:
+                # Convert to a step-level error so on_failure routing
+                # (skip / retry) gets a chance.
+                raise RuntimeError(f"HTTP 요청 실패: {e}") from e
+            if action.store_in:
+                self._vars[action.store_in] = resp_text
+                log.info(
+                    "HTTP response stored in ${%s} (%d chars)",
+                    action.store_in, len(resp_text),
+                )
+            return
+
+        if isinstance(action, ClipboardAction):
+            from .clipboard import (
+                ClipboardUnavailable,
+                get_clipboard_text,
+                set_clipboard_text,
+            )
+            try:
+                if action.op == "set":
+                    set_clipboard_text(self._sub(action.text))
+                elif action.op == "copy":
+                    # Send Ctrl+C to capture the foreground app's
+                    # selection, give the OS a moment to populate the
+                    # clipboard, then read it back. The 80 ms delay is a
+                    # tradeoff: too low and Word/Notepad miss the copy,
+                    # too high and the macro feels sluggish.
+                    self._input("normal").key("ctrl+c")
+                    self._interruptible_sleep(0.08)
+                    text = get_clipboard_text()
+                    self._vars[action.variable] = text
+                    log.info(
+                        "clipboard copied → ${%s}=%r",
+                        action.variable, text[:60],
+                    )
+                elif action.op == "paste":
+                    self._input("normal").key("ctrl+v")
+                else:
+                    raise ValueError(f"unknown clipboard op: {action.op}")
+            except ClipboardUnavailable as e:
+                # Surface as a normal step error so on_failure handling
+                # (skip / retry) kicks in instead of crashing the runner.
+                raise RuntimeError(f"clipboard unavailable: {e}") from e
+            return
+
         if isinstance(action, ExtractTextAction):
             cap = self._capturer_or_default()
             haystack = cap.grab(
@@ -732,6 +816,68 @@ class Runner:
     def _sub(self, text: str) -> str:
         """Apply ``${var}`` substitution against the runtime variables."""
         return substitute(text, self._vars)
+
+    # --- sub-macro call -----------------------------------------------------
+
+    def _call_sub_macro(self, action: "CallMacroAction") -> None:
+        """Run another macro inline.
+
+        Why not just call ``Runner(...).run()``: we need to share the
+        ``_vars`` dict (so the callee can read AND write the parent's
+        variables), respect the parent's ``_control``, and route the
+        callee's observer events through the parent's observer so the
+        history dashboard sees one continuous run rather than two.
+
+        Cycle guard: maintain ``_call_chain`` of resolved YAML paths;
+        refuse to enter the same path twice.
+        """
+        from ..storage.yaml_repo import load_macro
+
+        rel_or_abs = self._sub(action.path)
+        target = Path(rel_or_abs)
+        if not target.is_absolute():
+            target = (self.macro_dir / rel_or_abs).resolve()
+        else:
+            target = target.resolve()
+
+        target_key = str(target)
+        if target_key in self._call_chain:
+            raise RuntimeError(
+                f"sub-macro recursion detected: {' → '.join(self._call_chain + [target_key])}",
+            )
+        if not target.is_file():
+            raise FileNotFoundError(f"sub-macro not found: {target}")
+
+        sub_macro = load_macro(target)
+        # Spin up a child runner that shares state with the parent. We
+        # pass the parent's _vars *as-is* (not a copy) so writes inside
+        # the callee are visible to subsequent parent steps.
+        child = Runner(
+            sub_macro,
+            macro_dir=target.parent,
+            capturer=self._capturer,
+            input_normal=self._input_normal,
+            input_raw=self._input_raw,
+            web_session=self._web_session,
+            control=self._control,
+            stop_flag=self._stop,
+            observer=self._observer,
+            debug_capture_dir=self._debug_capture_dir,
+            sleep=self._sleep,
+            clock=self._clock,
+        )
+        # Share the variables dict by reference + propagate the call
+        # chain so further nesting still sees us.
+        child._vars = self._vars
+        child._call_chain = self._call_chain + [target_key]
+        # Don't emit run_start/run_end on the child — the parent's
+        # observer is already in a run, and the history would otherwise
+        # show two entries for one logical execution.
+        result = child.run()
+        if not result.completed:
+            raise RuntimeError(
+                f"sub-macro '{target.name}' aborted at {result.aborted_at}",
+            )
 
     # --- failure capture (Phase 5) -------------------------------------------
 

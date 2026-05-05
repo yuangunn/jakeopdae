@@ -1036,10 +1036,11 @@ class MainWindow(QMainWindow):
                 "먼저 매크로를 저장해 주세요. 그래야 템플릿 경로가 정확히 풀려요.",
             )
             return
-        # Strip on_success_goto so the test doesn't try to chain to a
-        # step that won't exist in the one-step macro.
+        # Strip both goto branches so the test doesn't try to chain to
+        # a step that won't exist in the one-step macro.
         test_step = step.model_copy(update={
             "on_success_goto": None,
+            "on_failure_goto": None,
             "repeat": 1,
         })
         test_macro = self._macro.model_copy(update={

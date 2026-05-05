@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QStackedWidget,
@@ -29,9 +30,12 @@ from PySide6.QtWidgets import (
 
 from ..models import (
     Action,
+    CallMacroAction,
     ClickAction,
+    ClipboardAction,
     DragAction,
     ExtractTextAction,
+    HttpAction,
     HybridImageTrigger,
     ImageTrigger,
     KeyAction,
@@ -61,6 +65,9 @@ _ACTION_TYPES = [
     "click", "key", "type", "drag", "wait",
     "web_click", "web_type", "web_navigate",
     "extract_text",
+    "clipboard",
+    "http",
+    "call_macro",
 ]
 
 # Display labels — kept separate so the combo userData stays the schema key.
@@ -84,6 +91,9 @@ _ACTION_LABELS = {
     "web_type": "웹 요소에 입력",
     "web_navigate": "URL로 이동",
     "extract_text": "텍스트 추출 → 변수",
+    "clipboard": "클립보드 복사/붙여넣기",
+    "http": "HTTP 요청 보내기",
+    "call_macro": "다른 매크로 실행",
 }
 
 
@@ -149,12 +159,19 @@ class StepForm(QWidget):
         self.repeat.setRange(1, 1000)
         self.goto = QLineEdit()
         self.goto.setPlaceholderText("성공 시 점프할 다른 단계 ID (비우면 다음 단계로)")
+        # B5: failure-branch goto. Together with on_failure handles
+        # if/else patterns: trigger-not-met → goto X; else fall through.
+        self.goto_failure = QLineEdit()
+        self.goto_failure.setPlaceholderText(
+            "실패 시 점프할 단계 ID (비우면 위 '실패하면?' 정책 적용)"
+        )
         gl.addRow("ID", self.id_edit)
         gl.addRow("이름", self.name_edit)
         gl.addRow("실패하면?", self.on_failure)
         gl.addRow("재시도 횟수", self.retry_count)
         gl.addRow("이 단계 반복", self.repeat)
         gl.addRow("성공 시 다음 단계", self.goto)
+        gl.addRow("실패 시 다음 단계", self.goto_failure)
         outer.addWidget(general)
 
         # Trigger group.
@@ -193,6 +210,9 @@ class StepForm(QWidget):
         self._build_web_type_form()
         self._build_web_navigate_form()
         self._build_extract_text_form()
+        self._build_clipboard_form()
+        self._build_http_form()
+        self._build_call_macro_form()
         av.addWidget(self.action_stack)
         outer.addWidget(act_box)
 
@@ -205,7 +225,7 @@ class StepForm(QWidget):
         self.action_type.currentIndexChanged.connect(self._emit_changed)
 
         for w in (
-            self.id_edit, self.name_edit, self.goto,
+            self.id_edit, self.name_edit, self.goto, self.goto_failure,
         ):
             w.editingFinished.connect(self._emit_changed)
         self.on_failure.currentIndexChanged.connect(self._emit_changed)
@@ -598,6 +618,102 @@ class StepForm(QWidget):
         f.addRow("", self.ext_strip)
         self.action_stack.addWidget(w)
 
+    def _build_clipboard_form(self) -> None:
+        """Clipboard action editor — single combo for op + a text/var
+        field whose role swaps based on the chosen op."""
+        w = QWidget(); f = QFormLayout(w)
+        self.clip_op = _bilingual_combo([
+            ("paste", "붙여넣기 (Ctrl+V)"),
+            ("copy", "복사해서 변수에 저장 (Ctrl+C)"),
+            ("set", "이 텍스트를 클립보드에 쓰기"),
+        ])
+        self.clip_text = QLineEdit()
+        self.clip_text.setPlaceholderText("예: 안녕하세요  (${var} 사용 가능)")
+        self.clip_var = QLineEdit("clipboard")
+        self.clip_var.setPlaceholderText("저장할 변수명 (예: clipboard, otp)")
+        # Hint label tells the user which field the current op uses.
+        self._clip_hint = QLabel(
+            "💡 op 선택에 따라 아래 필드 중 한 줄만 의미가 있어요"
+        )
+        self._clip_hint.setStyleSheet(
+            "color: #A39B85; font-size: 10px;"
+        )
+
+        self.clip_op.currentIndexChanged.connect(self._emit_changed)
+        self.clip_text.editingFinished.connect(self._emit_changed)
+        self.clip_var.editingFinished.connect(self._emit_changed)
+
+        f.addRow("동작", self.clip_op)
+        f.addRow("쓸 텍스트  (op=set)", self.clip_text)
+        f.addRow("저장할 변수  (op=copy)", self.clip_var)
+        f.addRow("", self._clip_hint)
+        self.action_stack.addWidget(w)
+
+    def _build_http_form(self) -> None:
+        """HTTP request editor: method + URL + headers + body.
+
+        Headers entered as one ``Name: Value`` pair per line — easier
+        for non-coders than a key/value table widget. Parsed on
+        ``to_step()`` and re-rendered on ``load_step()`` for
+        round-tripping."""
+        w = QWidget(); f = QFormLayout(w)
+        self.http_method = _bilingual_combo([
+            ("GET", "GET"), ("POST", "POST"), ("PUT", "PUT"),
+            ("DELETE", "DELETE"), ("PATCH", "PATCH"),
+        ])
+        self.http_url = QLineEdit()
+        self.http_url.setPlaceholderText(
+            "https://example.com/api  (${var} 사용 가능)"
+        )
+        self.http_headers = QPlainTextEdit()
+        self.http_headers.setPlaceholderText(
+            "Content-Type: application/json\nAuthorization: Bearer ${token}"
+        )
+        self.http_headers.setFixedHeight(60)
+        self.http_body = QPlainTextEdit()
+        self.http_body.setPlaceholderText(
+            '예: {"event":"done","otp":"${otp}"}'
+        )
+        self.http_body.setFixedHeight(80)
+        self.http_timeout = QDoubleSpinBox()
+        self.http_timeout.setRange(0.5, 120.0); self.http_timeout.setValue(10.0)
+        self.http_store = QLineEdit()
+        self.http_store.setPlaceholderText(
+            "비워두면 응답 버림 — 변수명 입력 시 ${var} 로 다음 단계에서 사용"
+        )
+
+        self.http_method.currentIndexChanged.connect(self._emit_changed)
+        self.http_url.editingFinished.connect(self._emit_changed)
+        self.http_headers.textChanged.connect(self._emit_changed)
+        self.http_body.textChanged.connect(self._emit_changed)
+        self.http_timeout.valueChanged.connect(self._emit_changed)
+        self.http_store.editingFinished.connect(self._emit_changed)
+
+        f.addRow("메서드", self.http_method)
+        f.addRow("URL", self.http_url)
+        f.addRow("헤더 (한 줄에 Name: Value)", self.http_headers)
+        f.addRow("본문 (Body)", self.http_body)
+        f.addRow("타임아웃 (초)", self.http_timeout)
+        f.addRow("응답 저장 변수", self.http_store)
+        self.action_stack.addWidget(w)
+
+    def _build_call_macro_form(self) -> None:
+        """Sub-macro caller: just a path field. Variables are shared
+        with the parent automatically — no UI surface needed."""
+        w = QWidget(); f = QFormLayout(w)
+        self.cm_path = QLineEdit()
+        self.cm_path.setPlaceholderText(
+            "shared/login.yaml  (현재 매크로 폴더 기준 상대경로)"
+        )
+        self.cm_path.editingFinished.connect(self._emit_changed)
+        cm_hint = QLabel(
+            "💡 부모 매크로의 ${변수} 들이 자식에게 그대로 전달돼요"
+        )
+        cm_hint.setStyleSheet("color: #A39B85; font-size: 10px;")
+        f.addRow("매크로 파일 경로", self.cm_path)
+        f.addRow("", cm_hint)
+        self.action_stack.addWidget(w)
+
     def _build_web_click_form(self) -> None:
         w = QWidget(); f = QFormLayout(w)
         self.wc_selector = QLineEdit()
@@ -669,6 +785,7 @@ class StepForm(QWidget):
             self.retry_count.setValue(step.retry_count)
             self.repeat.setValue(step.repeat)
             self.goto.setText(step.on_success_goto or "")
+            self.goto_failure.setText(step.on_failure_goto or "")
 
             self._load_trigger(step.trigger)
             self._load_action(step.action)
@@ -802,6 +919,28 @@ class StepForm(QWidget):
             idx = self.ext_lang.findData(act.language)
             if idx >= 0: self.ext_lang.setCurrentIndex(idx)
             self.ext_strip.setChecked(act.strip)
+        elif isinstance(act, ClipboardAction):
+            self.action_type.setCurrentIndex(_ACTION_TYPES.index("clipboard"))
+            self.action_stack.setCurrentIndex(_ACTION_TYPES.index("clipboard"))
+            _select_data(self.clip_op, act.op)
+            self.clip_text.setText(act.text)
+            self.clip_var.setText(act.variable)
+        elif isinstance(act, HttpAction):
+            self.action_type.setCurrentIndex(_ACTION_TYPES.index("http"))
+            self.action_stack.setCurrentIndex(_ACTION_TYPES.index("http"))
+            _select_data(self.http_method, act.method)
+            self.http_url.setText(act.url)
+            # One "Name: Value" per line for the headers textarea.
+            self.http_headers.setPlainText(
+                "\n".join(f"{k}: {v}" for k, v in act.headers.items())
+            )
+            self.http_body.setPlainText(act.body)
+            self.http_timeout.setValue(act.timeout_s)
+            self.http_store.setText(act.store_in)
+        elif isinstance(act, CallMacroAction):
+            self.action_type.setCurrentIndex(_ACTION_TYPES.index("call_macro"))
+            self.action_stack.setCurrentIndex(_ACTION_TYPES.index("call_macro"))
+            self.cm_path.setText(act.path)
 
     # --- snapshot -> Step --------------------------------------------------
 
@@ -818,6 +957,7 @@ class StepForm(QWidget):
             retry_count=self.retry_count.value(),
             repeat=self.repeat.value(),
             on_success_goto=(self.goto.text().strip() or None),
+            on_failure_goto=(self.goto_failure.text().strip() or None),
         )
 
     def _build_trigger(self) -> Trigger:
@@ -941,6 +1081,35 @@ class StepForm(QWidget):
             return WebNavigateAction(
                 url=self.wn_url.text() or "https://example.com",
                 wait_until=cast("str", self.wn_wait.currentData() or "load"),
+            )
+        if kind == "clipboard":
+            return ClipboardAction(
+                op=cast("str", self.clip_op.currentData() or "paste"),
+                text=self.clip_text.text(),
+                variable=self.clip_var.text() or "clipboard",
+            )
+        if kind == "http":
+            # Parse "Name: Value" lines into a dict — empty / malformed
+            # lines are silently dropped so a typo doesn't block save.
+            headers: dict[str, str] = {}
+            for line in self.http_headers.toPlainText().splitlines():
+                if ":" not in line:
+                    continue
+                k, _, v = line.partition(":")
+                k, v = k.strip(), v.strip()
+                if k:
+                    headers[k] = v
+            return HttpAction(
+                url=self.http_url.text() or "https://example.com",
+                method=cast("str", self.http_method.currentData() or "GET"),
+                headers=headers,
+                body=self.http_body.toPlainText(),
+                timeout_s=self.http_timeout.value(),
+                store_in=self.http_store.text(),
+            )
+        if kind == "call_macro":
+            return CallMacroAction(
+                path=self.cm_path.text() or "shared/sub.yaml",
             )
         # extract_text
         return ExtractTextAction(
