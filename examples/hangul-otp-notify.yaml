@@ -1,0 +1,59 @@
+# 한국어 사용자 워크플로 종합 데모 — C 시리즈 기능 모두 활용
+#
+# 시나리오:
+#   1) 본인인증 페이지에서 사용자가 [인증번호 받기] 누름
+#   2) 카카오톡으로 6자리 인증번호 도착 → 사용자가 그 메시지 복사 (Ctrl+C)
+#   3) 매크로가 클립보드 변화 감지 → ${otp} 변수에 저장
+#   4) 매크로가 입력란에 자동 입력 (한글이 아니라서 키보드 입력)
+#   5) 인증 완료 메시지(한글)는 클립보드 paste 모드로 입력
+#   6) 작업 완료 시 텔레그램으로 알림
+#
+# 실제로 쓰려면 ${TELEGRAM_TOKEN} / ${TELEGRAM_CHAT_ID} 환경변수 또는
+# variables 블록에 직접 입력하세요.
+
+name: 본인인증-자동완료
+description: 카카오톡 OTP 도착 → 입력 → 텔레그램 알림 전체 흐름
+max_total_runtime_s: 600
+
+variables:
+  # 이 줄에 본인 봇 토큰/채팅 ID 채우면 됩니다 (Bot Father 에서 발급).
+  bot_token: "REPLACE_ME"
+  chat_id: "REPLACE_ME"
+
+steps:
+  - id: wait_otp
+    name: 카카오톡에서 OTP 복사 대기
+    trigger:
+      type: clipboard
+      pattern: "\\d{6}"        # 6자리 숫자만 매칭
+      capture_var: otp
+      timeout_s: 120
+      poll_interval_s: 0.5
+    action: { type: wait, duration_s: 0.0 }
+
+  - id: type_otp
+    name: 입력란에 OTP 자동 입력
+    trigger: { type: time, delay_s: 0.3 }
+    action:
+      type: type
+      text: "${otp}"
+      mode: keystrokes        # 6자리 숫자 ASCII → 키보드 직접 입력
+
+  - id: confirm_korean
+    name: "확인 글귀 한글 입력"
+    trigger: { type: time, delay_s: 0.5 }
+    action:
+      type: type
+      text: "본인 확인 완료"
+      mode: auto              # 한글 → 클립보드 paste 자동 fallback
+
+  - id: notify_done
+    name: 텔레그램으로 완료 알림
+    trigger: { type: time, delay_s: 0.2 }
+    action:
+      type: notify
+      provider: telegram
+      token: "${bot_token}"
+      chat_id: "${chat_id}"
+      text: "✅ 본인인증 완료 — OTP ${otp} 사용"
+    on_failure: skip          # 알림 실패해도 매크로 자체는 OK

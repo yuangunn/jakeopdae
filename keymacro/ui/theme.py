@@ -63,6 +63,7 @@ STRIPE: Final[dict[str, str]] = {
     "hybrid_image": C["primary"],   # brass — the "bridges two worlds" stamp
     "ocr_text": C["senary"],        # khaki — the librarian stamp
     "schedule": C["tertiary"],      # sage — schedule is time-family
+    "clipboard": C["senary"],       # khaki — also "data-from-elsewhere" feel
 }
 
 
@@ -286,6 +287,13 @@ QLabel[badge="ocr_text"] {{
 QLabel[badge="schedule"] {{
     background-color: {C['tertiary-container']};
     color: {C['on-tertiary-container']};
+    border-radius: {R['sm']}px;
+    padding: 2px 6px;
+    font-size: 9px; font-weight: 700; letter-spacing: 0.8px;
+}}
+QLabel[badge="clipboard"] {{
+    background-color: {C['senary-container']};
+    color: {C['on-senary-container']};
     border-radius: {R['sm']}px;
     padding: 2px 6px;
     font-size: 9px; font-weight: 700; letter-spacing: 0.8px;

@@ -109,6 +109,57 @@ class PixelColorTrigger(BaseModel):
         return v
 
 
+class ClipboardChangeTrigger(BaseModel):
+    """Watch the OS clipboard for new text matching ``pattern``.
+
+    Common use case: 본인인증 / 2FA. The user receives an OTP via SMS,
+    KakaoTalk, or email, copies it (Ctrl+C), and a step waiting on this
+    trigger fires immediately. The captured text lands in
+    ``runner._vars[capture_var]`` so a subsequent TypeAction can paste
+    ``${otp}``.
+
+    Trigger semantics:
+        - On first poll, takes a baseline snapshot of the clipboard
+          contents. *That* value never matches — only changes from this
+          baseline count.
+        - Every ``poll_interval_s`` seconds, re-reads the clipboard. If
+          the contents differ AND match ``pattern``, fires.
+        - ``pattern`` is a Python regex. Default ``\\d{6}`` matches a
+          standard 6-digit OTP.
+
+    Why baseline-then-change rather than "any matching text":
+        The user might already have an old OTP on their clipboard.
+        Without baseline gating, the trigger would fire instantly on
+        stale data. With it, the macro waits for an *intentional* copy.
+    """
+
+    type: Literal["clipboard"] = "clipboard"
+    pattern: str = r"\d{6}"
+    capture_var: str = "otp"
+    """Variable name that receives the matched text (the regex's whole
+    match, not the first group). Available to subsequent steps via
+    ``${var}`` substitution."""
+    timeout_s: float = 60.0
+    poll_interval_s: float = 0.4
+
+    @field_validator("pattern")
+    @classmethod
+    def _valid_regex(cls, v: str) -> str:
+        import re as _re
+        try:
+            _re.compile(v)
+        except _re.error as e:
+            raise ValueError(f"invalid regex: {e}") from e
+        return v
+
+    @field_validator("timeout_s", "poll_interval_s")
+    @classmethod
+    def _positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("must be > 0")
+        return v
+
+
 # Now safe to import the modules that reference ``Region`` above.
 from .hybrid import HybridImageTrigger  # noqa: E402  (deferred to break cycle)
 from .ocr import OcrTextTrigger  # noqa: E402  (also deferred)
@@ -121,6 +172,7 @@ Trigger = Annotated[
         ImageTrigger,
         TimeTrigger,
         PixelColorTrigger,
+        ClipboardChangeTrigger,
         WebElementVisibleTrigger,
         WebUrlTrigger,
         HybridImageTrigger,

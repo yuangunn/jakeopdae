@@ -1,10 +1,18 @@
-from .trigger import Region, ImageTrigger, TimeTrigger, PixelColorTrigger, Trigger
+from .trigger import (
+    ClipboardChangeTrigger,
+    Region,
+    ImageTrigger,
+    TimeTrigger,
+    PixelColorTrigger,
+    Trigger,
+)
 from .action import (
     CallMacroAction,
     ClickAction,
     ClipboardAction,
     HttpAction,
     KeyAction,
+    NotifyAction,
     TypeAction,
     DragAction,
     WaitAction,
@@ -25,6 +33,7 @@ from .web import (
 )
 
 __all__ = [
+    "ClipboardChangeTrigger",
     "Region",
     "ImageTrigger",
     "TimeTrigger",
@@ -35,6 +44,7 @@ __all__ = [
     "ClipboardAction",
     "HttpAction",
     "KeyAction",
+    "NotifyAction",
     "TypeAction",
     "DragAction",
     "WaitAction",

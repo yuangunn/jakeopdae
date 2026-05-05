@@ -33,11 +33,13 @@ from ..models import (
     CallMacroAction,
     ClickAction,
     ClipboardAction,
+    ClipboardChangeTrigger,
     DragAction,
     ExtractTextAction,
     HttpAction,
     HybridImageTrigger,
     ImageTrigger,
+    NotifyAction,
     KeyAction,
     OcrTextTrigger,
     PixelColorTrigger,
@@ -59,7 +61,7 @@ from ..models import (
 _TRIGGER_TYPES = [
     "image", "time", "pixel",
     "web_element", "web_url", "hybrid_image",
-    "ocr_text", "schedule",
+    "ocr_text", "schedule", "clipboard",
 ]
 _ACTION_TYPES = [
     "click", "key", "type", "drag", "wait",
@@ -68,6 +70,7 @@ _ACTION_TYPES = [
     "clipboard",
     "http",
     "call_macro",
+    "notify",
 ]
 
 # Display labels — kept separate so the combo userData stays the schema key.
@@ -80,6 +83,7 @@ _TRIGGER_LABELS = {
     "hybrid_image": "이미지+URL (디버그 모드 X)",
     "ocr_text": "화면 텍스트가 보이면",
     "schedule": "예약 시각이 되면",
+    "clipboard": "클립보드에 OTP 들어오면",
 }
 _ACTION_LABELS = {
     "click": "클릭한다",
@@ -94,6 +98,7 @@ _ACTION_LABELS = {
     "clipboard": "클립보드 복사/붙여넣기",
     "http": "HTTP 요청 보내기",
     "call_macro": "다른 매크로 실행",
+    "notify": "외부 알림 보내기",
 }
 
 
@@ -190,6 +195,9 @@ class StepForm(QWidget):
         self._build_hybrid_image_trigger_form()
         self._build_ocr_trigger_form()
         self._build_schedule_trigger_form()
+        # Stack index must align with _TRIGGER_TYPES order — clipboard
+        # is index 8, after schedule (7).
+        self._build_clipboard_trigger_form()
         tv.addWidget(self.trigger_stack)
         outer.addWidget(trig_box)
 
@@ -213,6 +221,7 @@ class StepForm(QWidget):
         self._build_clipboard_form()
         self._build_http_form()
         self._build_call_macro_form()
+        self._build_notify_form()
         av.addWidget(self.action_stack)
         outer.addWidget(act_box)
 
@@ -358,15 +367,23 @@ class StepForm(QWidget):
         f.addRow("입력 방식", self.key_input)
         self.action_stack.addWidget(w)
 
-    def _build_type_form(self) -> None:
+    def _build_type_form(self) -> None:  # noqa: D401
         w = QWidget(); f = QFormLayout(w)
         self.type_text = QLineEdit()
         self.type_interval = QDoubleSpinBox(); self.type_interval.setRange(0.0, 5.0); self.type_interval.setSingleStep(0.01)
+        # IME mode — auto routes Korean / emoji through clipboard paste.
+        self.type_mode = _bilingual_combo([
+            ("auto", "자동 (한글은 붙여넣기)"),
+            ("keystrokes", "항상 키 입력 (raw)"),
+            ("clipboard", "항상 붙여넣기 (Ctrl+V)"),
+        ])
         self.type_text.editingFinished.connect(self._emit_changed)
         self.type_interval.valueChanged.connect(self._emit_changed)
+        self.type_mode.currentIndexChanged.connect(self._emit_changed)
         self.type_text.setPlaceholderText("예: 안녕하세요")
         f.addRow("입력할 텍스트", self.type_text)
         f.addRow("글자 사이 간격 (초)", self.type_interval)
+        f.addRow("입력 방식", self.type_mode)
         self.action_stack.addWidget(w)
 
     def _build_drag_form(self) -> None:
@@ -565,6 +582,31 @@ class StepForm(QWidget):
         f.addRow("", pick_btn)
         self.trigger_stack.addWidget(w)
 
+    def _build_clipboard_trigger_form(self) -> None:
+        """ClipboardChangeTrigger editor — pattern + capture variable
+        + timing knobs."""
+        w = QWidget(); f = QFormLayout(w)
+        self.clip_pattern = QLineEdit(r"\d{6}")
+        self.clip_pattern.setPlaceholderText(r"정규식 — 기본: \d{6} (6자리 숫자)")
+        self.clip_capture = QLineEdit("otp")
+        self.clip_capture.setPlaceholderText("저장할 변수명 (예: otp, code)")
+        self.clip_timeout = QDoubleSpinBox()
+        self.clip_timeout.setRange(1.0, 3600.0); self.clip_timeout.setValue(120.0)
+        self.clip_poll = QDoubleSpinBox()
+        self.clip_poll.setRange(0.05, 5.0); self.clip_poll.setValue(0.4)
+        self.clip_poll.setSingleStep(0.1)
+
+        for ed in (self.clip_pattern, self.clip_capture):
+            ed.editingFinished.connect(self._emit_changed)
+        for sp in (self.clip_timeout, self.clip_poll):
+            sp.valueChanged.connect(self._emit_changed)
+
+        f.addRow("정규식 패턴", self.clip_pattern)
+        f.addRow("저장할 변수명", self.clip_capture)
+        f.addRow("최대 대기 (초)", self.clip_timeout)
+        f.addRow("확인 주기 (초)", self.clip_poll)
+        self.trigger_stack.addWidget(w)
+
     def _build_schedule_trigger_form(self) -> None:
         w = QWidget(); f = QFormLayout(w)
         self.sch_at = QLineEdit("09:00")
@@ -712,6 +754,54 @@ class StepForm(QWidget):
         cm_hint.setStyleSheet("color: #A39B85; font-size: 10px;")
         f.addRow("매크로 파일 경로", self.cm_path)
         f.addRow("", cm_hint)
+        self.action_stack.addWidget(w)
+
+    def _build_notify_form(self) -> None:
+        """Notification editor — provider combo + provider-specific
+        credentials. Only telegram needs token+chat_id; the rest take
+        webhook_url. Both fields show always (compact form, no
+        per-provider hide/show juggling) and are silently ignored
+        server-side when irrelevant."""
+        w = QWidget(); f = QFormLayout(w)
+        self.notify_provider = _bilingual_combo([
+            ("telegram", "Telegram"),
+            ("slack", "Slack 웹훅"),
+            ("discord", "Discord 웹훅"),
+            ("kakao_work", "KakaoWork 웹훅"),
+        ])
+        self.notify_text = QLineEdit()
+        self.notify_text.setPlaceholderText(
+            "보낼 메시지  (${var} 사용 가능)"
+        )
+        self.notify_token = QLineEdit()
+        self.notify_token.setPlaceholderText(
+            "Telegram 봇 토큰 (예: 123:ABC…)"
+        )
+        self.notify_chat = QLineEdit()
+        self.notify_chat.setPlaceholderText(
+            "Telegram chat_id (예: -1001234567)"
+        )
+        self.notify_webhook = QLineEdit()
+        self.notify_webhook.setPlaceholderText(
+            "Slack/Discord/KakaoWork 웹훅 URL"
+        )
+        self.notify_timeout = QDoubleSpinBox()
+        self.notify_timeout.setRange(0.5, 60.0); self.notify_timeout.setValue(10.0)
+
+        self.notify_provider.currentIndexChanged.connect(self._emit_changed)
+        for ed in (
+            self.notify_text, self.notify_token,
+            self.notify_chat, self.notify_webhook,
+        ):
+            ed.editingFinished.connect(self._emit_changed)
+        self.notify_timeout.valueChanged.connect(self._emit_changed)
+
+        f.addRow("채널", self.notify_provider)
+        f.addRow("메시지", self.notify_text)
+        f.addRow("Token (Telegram)", self.notify_token)
+        f.addRow("chat_id (Telegram)", self.notify_chat)
+        f.addRow("웹훅 URL (Slack 등)", self.notify_webhook)
+        f.addRow("타임아웃 (초)", self.notify_timeout)
         self.action_stack.addWidget(w)
 
     def _build_web_click_form(self) -> None:
@@ -869,6 +959,13 @@ class StepForm(QWidget):
             for i, cb in enumerate(self.sch_days):
                 cb.setChecked(i in trig.weekdays)
             self.sch_grace.setValue(trig.grace_s)
+        elif isinstance(trig, ClipboardChangeTrigger):
+            self.trigger_type.setCurrentIndex(_TRIGGER_TYPES.index("clipboard"))
+            self.trigger_stack.setCurrentIndex(_TRIGGER_TYPES.index("clipboard"))
+            self.clip_pattern.setText(trig.pattern)
+            self.clip_capture.setText(trig.capture_var)
+            self.clip_timeout.setValue(trig.timeout_s)
+            self.clip_poll.setValue(trig.poll_interval_s)
 
     def _load_action(self, act: Action) -> None:
         if isinstance(act, ClickAction):
@@ -886,6 +983,7 @@ class StepForm(QWidget):
             self.action_type.setCurrentIndex(_ACTION_TYPES.index("type")); self.action_stack.setCurrentIndex(2)
             self.type_text.setText(act.text)
             self.type_interval.setValue(act.interval_s)
+            _select_data(self.type_mode, act.mode)
         elif isinstance(act, DragAction):
             self.action_type.setCurrentIndex(_ACTION_TYPES.index("drag")); self.action_stack.setCurrentIndex(3)
             self.drag_x1.setValue(act.x1); self.drag_y1.setValue(act.y1)
@@ -941,6 +1039,15 @@ class StepForm(QWidget):
             self.action_type.setCurrentIndex(_ACTION_TYPES.index("call_macro"))
             self.action_stack.setCurrentIndex(_ACTION_TYPES.index("call_macro"))
             self.cm_path.setText(act.path)
+        elif isinstance(act, NotifyAction):
+            self.action_type.setCurrentIndex(_ACTION_TYPES.index("notify"))
+            self.action_stack.setCurrentIndex(_ACTION_TYPES.index("notify"))
+            _select_data(self.notify_provider, act.provider)
+            self.notify_text.setText(act.text)
+            self.notify_token.setText(act.token)
+            self.notify_chat.setText(act.chat_id)
+            self.notify_webhook.setText(act.webhook_url)
+            self.notify_timeout.setValue(act.timeout_s)
 
     # --- snapshot -> Step --------------------------------------------------
 
@@ -1027,12 +1134,19 @@ class StepForm(QWidget):
                 timeout_s=self.ocr_timeout.value(),
                 poll_interval_s=self.ocr_poll.value(),
             )
-        # schedule
-        days = [i for i, cb in enumerate(self.sch_days) if cb.isChecked()] or [0]
-        return ScheduleTrigger(
-            at=self.sch_at.text() or "09:00",
-            weekdays=days,
-            grace_s=self.sch_grace.value(),
+        if kind == "schedule":
+            days = [i for i, cb in enumerate(self.sch_days) if cb.isChecked()] or [0]
+            return ScheduleTrigger(
+                at=self.sch_at.text() or "09:00",
+                weekdays=days,
+                grace_s=self.sch_grace.value(),
+            )
+        # clipboard
+        return ClipboardChangeTrigger(
+            pattern=self.clip_pattern.text() or r"\d{6}",
+            capture_var=self.clip_capture.text() or "otp",
+            timeout_s=self.clip_timeout.value(),
+            poll_interval_s=self.clip_poll.value(),
         )
 
     def _build_action(self) -> Action:
@@ -1054,6 +1168,7 @@ class StepForm(QWidget):
             return TypeAction(
                 text=self.type_text.text(),
                 interval_s=self.type_interval.value(),
+                mode=cast("str", self.type_mode.currentData() or "auto"),
             )
         if kind == "drag":
             return DragAction(
@@ -1110,6 +1225,15 @@ class StepForm(QWidget):
         if kind == "call_macro":
             return CallMacroAction(
                 path=self.cm_path.text() or "shared/sub.yaml",
+            )
+        if kind == "notify":
+            return NotifyAction(
+                provider=cast("str", self.notify_provider.currentData() or "telegram"),
+                text=self.notify_text.text() or "작업대 매크로 완료",
+                token=self.notify_token.text(),
+                chat_id=self.notify_chat.text(),
+                webhook_url=self.notify_webhook.text(),
+                timeout_s=self.notify_timeout.value(),
             )
         # extract_text
         return ExtractTextAction(

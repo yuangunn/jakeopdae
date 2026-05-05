@@ -41,12 +41,31 @@ class KeyAction(BaseModel):
         return v
 
 
+_TypeMode = Literal["auto", "keystrokes", "clipboard"]
+
+
 class TypeAction(BaseModel):
-    """Type a string of text via the keyboard backend."""
+    """Type a string of text via the keyboard backend.
+
+    ``mode`` controls how non-ASCII text (Korean, emoji, CJK) is sent:
+
+        - ``auto`` (default): if the text is pure ASCII, send keystrokes
+          normally. Otherwise, fall back to clipboard paste — the OS IME
+          isn't bypassed, so 한글 lands intact instead of mojibake or
+          dropped jamo. The previous clipboard contents are preserved
+          (saved + restored).
+        - ``keystrokes``: always send raw keystrokes. Use this for
+          terminals or apps that ignore paste shortcuts. Korean may
+          mojibake on some apps depending on the active IME.
+        - ``clipboard``: always paste, even for pure ASCII. Useful when
+          the target field eats individual keystrokes (some Electron
+          inputs).
+    """
 
     type: Literal["type"] = "type"
     text: str
     interval_s: float = 0.0
+    mode: _TypeMode = "auto"
 
     @field_validator("interval_s")
     @classmethod
@@ -87,6 +106,55 @@ class WaitAction(BaseModel):
     def _non_negative(cls, v: float) -> float:
         if v < 0:
             raise ValueError("duration_s must be >= 0")
+        return v
+
+
+_NotifyProvider = Literal["telegram", "slack", "discord", "kakao_work"]
+
+
+class NotifyAction(BaseModel):
+    """Push a one-line notification through a webhook channel.
+
+    Use cases:
+        - "필수교육 자동화 끝" 알림이 휴대폰으로 와요 (Telegram)
+        - 사내 메신저(Slack/KakaoWork)에 "오늘 분량 완료" 자동 전송
+        - 디스코드 서버에 결과 통보
+
+    Placeholder substitution: ``text`` runs through ``${var}`` so a
+    macro that ran ``ExtractTextAction(variable='token')`` can include
+    ``${token}`` in the notify body.
+
+    Provider-specific fields:
+        - telegram: ``token`` + ``chat_id``  (no webhook_url)
+        - slack / discord / kakao_work: ``webhook_url`` (no token/chat_id)
+
+    All fields default to empty strings so YAML stays compact when the
+    provider doesn't need them. Validators run inside the channels
+    module at send time.
+    """
+
+    type: Literal["notify"] = "notify"
+    provider: _NotifyProvider = "telegram"
+    text: str
+    # Telegram-only:
+    token: str = ""
+    chat_id: str = ""
+    # Webhook-style providers:
+    webhook_url: str = ""
+    timeout_s: float = 10.0
+
+    @field_validator("text")
+    @classmethod
+    def _non_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("text must not be empty")
+        return v
+
+    @field_validator("timeout_s")
+    @classmethod
+    def _positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("timeout_s must be > 0")
         return v
 
 
@@ -229,6 +297,7 @@ Action = Annotated[
         ClipboardAction,
         HttpAction,
         CallMacroAction,
+        NotifyAction,
         WebClickAction,
         WebTypeAction,
         WebNavigateAction,

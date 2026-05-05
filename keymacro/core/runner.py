@@ -35,6 +35,7 @@ from ..models.action import (
     DragAction,
     HttpAction,
     KeyAction,
+    NotifyAction,
     TypeAction,
     WaitAction,
 )
@@ -43,7 +44,13 @@ from ..models.ocr import ExtractTextAction, OcrTextTrigger
 from ..models.schedule import ScheduleTrigger, seconds_until_next
 from ..models.step import Step
 from ..models.hybrid import HybridImageTrigger
-from ..models.trigger import ImageTrigger, PixelColorTrigger, TimeTrigger, Trigger
+from ..models.trigger import (
+    ClipboardChangeTrigger,
+    ImageTrigger,
+    PixelColorTrigger,
+    TimeTrigger,
+    Trigger,
+)
 from ..models.web import (
     WebClickAction,
     WebElementVisibleTrigger,
@@ -411,6 +418,8 @@ class Runner:
             return self._poll_image(step.id, trigger)
         if isinstance(trigger, PixelColorTrigger):
             return self._poll_pixel(trigger)
+        if isinstance(trigger, ClipboardChangeTrigger):
+            return self._poll_clipboard(step.id, trigger)
         if isinstance(trigger, WebElementVisibleTrigger):
             return self._poll_web_element(trigger)
         if isinstance(trigger, WebUrlTrigger):
@@ -451,6 +460,60 @@ class Runner:
         )
         self._interruptible_sleep(wait_s)
         return True
+
+    def _poll_clipboard(
+        self, step_id: str, trig: "ClipboardChangeTrigger",
+    ) -> Optional[bool]:
+        """Poll the OS clipboard for a regex-matching change.
+
+        Returns ``True`` on match, ``None`` on timeout (the runner's
+        convention — only ``None`` counts as trigger failure). Baseline
+        value (whatever was on the clipboard at trigger entry) is
+        recorded once. We never match against that baseline — only a
+        *change* counts. This avoids firing on stale OTP codes the
+        user copied earlier.
+
+        On match, the matched text lands in
+        ``self._vars[trig.capture_var]`` so a downstream
+        ``TypeAction(text='${otp}')`` can paste it.
+        """
+        import re as _re
+        from .clipboard import (
+            ClipboardUnavailable,
+            get_clipboard_text,
+        )
+
+        try:
+            baseline = get_clipboard_text()
+        except ClipboardUnavailable:
+            log.warning("clipboard unavailable; trigger %s will fail", step_id)
+            return None
+
+        pattern = _re.compile(trig.pattern)
+        deadline = self._clock() + trig.timeout_s
+        while self._clock() < deadline:
+            self._check_stop_or_pause()
+            try:
+                current = get_clipboard_text()
+            except ClipboardUnavailable:
+                # Transient — try again on the next poll. Most platforms
+                # surface this when another app holds the clipboard.
+                self._interruptible_sleep(trig.poll_interval_s)
+                continue
+            if current != baseline:
+                m = pattern.search(current)
+                if m is not None:
+                    self._vars[trig.capture_var] = m.group(0)
+                    log.info(
+                        "clipboard trigger %s fired; ${%s}=%r",
+                        step_id, trig.capture_var, m.group(0)[:30],
+                    )
+                    return True
+                # Update baseline so a partial change doesn't keep us
+                # comparing against the original — feels more responsive.
+                baseline = current
+            self._interruptible_sleep(trig.poll_interval_s)
+        return None
 
     def _poll_image(
         self, step_id: str, trig: ImageTrigger
@@ -699,7 +762,52 @@ class Runner:
 
         if isinstance(action, TypeAction):
             inp = self._input("normal")
-            inp.type_text(self._sub(action.text), action.interval_s)
+            text = self._sub(action.text)
+            # IME-aware: pure ASCII goes through normal keystrokes,
+            # anything with Korean / emoji / CJK falls back to clipboard
+            # paste so the OS IME doesn't mangle composition.
+            mode = action.mode
+            if mode == "auto":
+                mode = "keystrokes" if text.isascii() else "clipboard"
+            if mode == "keystrokes":
+                inp.type_text(text, action.interval_s)
+                return
+            # mode == "clipboard": save → set → Ctrl+V → restore so we
+            # don't trash whatever the user had on their clipboard.
+            from .clipboard import (
+                ClipboardUnavailable,
+                get_clipboard_text,
+                set_clipboard_text,
+            )
+            saved: Optional[str] = None
+            try:
+                try:
+                    saved = get_clipboard_text()
+                except ClipboardUnavailable:
+                    saved = None
+                set_clipboard_text(text)
+                # Tiny delay so the OS finishes accepting the new
+                # clipboard content before we trigger paste.
+                self._interruptible_sleep(0.05)
+                inp.key("ctrl+v")
+            except ClipboardUnavailable as e:
+                # Last-ditch fallback: send raw keystrokes anyway. Worse
+                # than paste for Korean, but better than no input.
+                log.warning(
+                    "clipboard paste fallback failed (%s); typing raw", e,
+                )
+                inp.type_text(text, action.interval_s)
+            finally:
+                if saved is not None:
+                    # Best-effort restore — don't blow up the run if the
+                    # clipboard has gone away.
+                    try:
+                        # Tiny delay so the paste fully consumes the
+                        # clipboard before we overwrite it again.
+                        self._interruptible_sleep(0.05)
+                        set_clipboard_text(saved)
+                    except ClipboardUnavailable:
+                        pass
             return
 
         if isinstance(action, DragAction):
@@ -736,6 +844,44 @@ class Runner:
 
         if isinstance(action, CallMacroAction):
             self._call_sub_macro(action)
+            return
+
+        if isinstance(action, NotifyAction):
+            from ..notify import channels as _ch
+            text = self._sub(action.text)
+            try:
+                if action.provider == "telegram":
+                    _ch.send_telegram(
+                        token=self._sub(action.token),
+                        chat_id=self._sub(action.chat_id),
+                        text=text,
+                        timeout_s=action.timeout_s,
+                    )
+                elif action.provider == "slack":
+                    _ch.send_slack(
+                        webhook_url=self._sub(action.webhook_url),
+                        text=text,
+                        timeout_s=action.timeout_s,
+                    )
+                elif action.provider == "discord":
+                    _ch.send_discord(
+                        webhook_url=self._sub(action.webhook_url),
+                        text=text,
+                        timeout_s=action.timeout_s,
+                    )
+                elif action.provider == "kakao_work":
+                    _ch.send_kakao_work(
+                        webhook_url=self._sub(action.webhook_url),
+                        text=text,
+                        timeout_s=action.timeout_s,
+                    )
+                else:
+                    raise ValueError(
+                        f"unknown notify provider: {action.provider}",
+                    )
+            except _ch.NotifyError as e:
+                # Convert to step error so on_failure routing applies.
+                raise RuntimeError(f"알림 전송 실패: {e}") from e
             return
 
         if isinstance(action, HttpAction):

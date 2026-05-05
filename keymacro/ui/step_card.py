@@ -35,12 +35,14 @@ from ..models import (
     CallMacroAction,
     ClickAction,
     ClipboardAction,
+    ClipboardChangeTrigger,
     DragAction,
     ExtractTextAction,
     HttpAction,
     HybridImageTrigger,
     ImageTrigger,
     KeyAction,
+    NotifyAction,
     OcrTextTrigger,
     PixelColorTrigger,
     ScheduleTrigger,
@@ -66,6 +68,7 @@ _TRIGGER_LABEL = {
     "hybrid_image": "이미지+URL",
     "ocr_text": "텍스트",
     "schedule": "예약",
+    "clipboard": "클립보드",
 }
 
 
@@ -76,6 +79,8 @@ def _trigger_kind(step: Step) -> str:
         return "time"
     if isinstance(step.trigger, PixelColorTrigger):
         return "pixel"
+    if isinstance(step.trigger, ClipboardChangeTrigger):
+        return "clipboard"
     if isinstance(step.trigger, WebElementVisibleTrigger):
         return "web_element"
     if isinstance(step.trigger, WebUrlTrigger):
@@ -123,6 +128,11 @@ def trigger_sentence(step: Step) -> str:
         return (
             f"({r.x}, {r.y}) ~ ({r.x + r.w}, {r.y + r.h}) 영역에서 "
             f"\"{t.text}\" 텍스트가 읽히면"
+        )
+    if isinstance(t, ClipboardChangeTrigger):
+        return (
+            f"클립보드에 패턴 \"{t.pattern}\" 의 텍스트가 들어오면 "
+            f"(${{{t.capture_var}}} 에 저장)"
         )
     if isinstance(t, ScheduleTrigger):
         days_kr = ["월", "화", "수", "목", "금", "토", "일"]
@@ -187,6 +197,13 @@ def action_sentence(action: Action) -> str:
     if isinstance(action, CallMacroAction):
         path = action.path if len(action.path) <= 36 else "…" + action.path[-32:]
         return f"→ 다른 매크로 실행: {path}"
+    if isinstance(action, NotifyAction):
+        text = action.text if len(action.text) <= 24 else action.text[:24] + "…"
+        provider_kr = {
+            "telegram": "텔레그램", "slack": "Slack",
+            "discord": "Discord", "kakao_work": "카카오워크",
+        }.get(action.provider, action.provider)
+        return f"→ {provider_kr} 알림: \"{text}\""
     return "→ (알 수 없는 동작)"
 
 

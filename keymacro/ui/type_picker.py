@@ -44,6 +44,8 @@ _TILES: list[tuple[StepKind, str, str, str]] = [
     ("clipboard", "📋", "클립보드 복사/붙여넣기", "Ctrl+C/V 또는 텍스트를 클립보드에 직접 쓰기"),
     ("http_request", "📡", "HTTP 요청 보내기", "GET/POST 등으로 외부 서버 호출 (웹훅, n8n, 자체 API)"),
     ("call_macro", "🔁", "다른 매크로 실행하기", "공통 로그인/사전 작업을 별도 yaml로 빼고 여기서 호출"),
+    ("clipboard_otp", "📋✨", "클립보드에 OTP가 들어오면", "본인인증 6자리 코드 등 정규식 매칭 기다리기"),
+    ("notify", "🔔", "외부로 알림 보내기", "Telegram/Slack/Discord/KakaoWork 웹훅 한 줄 메시지"),
 ]
 
 
@@ -128,8 +130,9 @@ class TypePicker(QDialog):
 def make_step_for_kind(kind: str, step_id: str):
     """Translate the picker's choice into a default Step instance."""
     from ..models import (
-        CallMacroAction, ClickAction, ClipboardAction, ExtractTextAction,
-        HttpAction, HybridImageTrigger, KeyAction, OcrTextTrigger,
+        CallMacroAction, ClickAction, ClipboardAction,
+        ClipboardChangeTrigger, ExtractTextAction, HttpAction,
+        HybridImageTrigger, KeyAction, NotifyAction, OcrTextTrigger,
         PixelColorTrigger, Region, ScheduleTrigger, Step, TimeTrigger,
         TypeAction, WaitAction, ImageTrigger, WebClickAction,
         WebElementVisibleTrigger, WebNavigateAction, WebUrlTrigger,
@@ -151,6 +154,8 @@ def make_step_for_kind(kind: str, step_id: str):
         "clipboard": "클립보드",
         "http_request": "HTTP 요청",
         "call_macro": "다른 매크로 호출",
+        "clipboard_otp": "클립보드 OTP 대기",
+        "notify": "외부 알림",
     }
     if kind == "image_click":
         return Step(
@@ -264,6 +269,27 @@ def make_step_for_kind(kind: str, step_id: str):
             id=step_id, name=name_map[kind],
             trigger=TimeTrigger(delay_s=0.0),
             action=CallMacroAction(path="shared/login.yaml"),
+        )
+    if kind == "clipboard_otp":
+        return Step(
+            id=step_id, name=name_map[kind],
+            trigger=ClipboardChangeTrigger(
+                pattern=r"\d{6}",
+                capture_var="otp",
+                timeout_s=120.0,
+            ),
+            # Default to typing the captured OTP — the most common
+            # follow-up action.
+            action=TypeAction(text="${otp}"),
+        )
+    if kind == "notify":
+        return Step(
+            id=step_id, name=name_map[kind],
+            trigger=TimeTrigger(delay_s=0.0),
+            action=NotifyAction(
+                provider="telegram",
+                text="작업대 매크로 완료",
+            ),
         )
     # schedule
     return Step(
