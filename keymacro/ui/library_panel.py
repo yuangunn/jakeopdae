@@ -138,6 +138,11 @@ class LibraryPanel(QWidget):
     reveal_requested = Signal(str)
     folder_added = Signal(str)
     folder_removed = Signal(str)
+    collapsed_changed = Signal(bool)
+    """``True`` when the panel just collapsed, ``False`` when expanded.
+    MainWindow listens to this so the parent QSplitter can redistribute
+    sizes — without that, only the panel's content width changes and
+    the splitter pane keeps the cached 220px slot."""
 
     COLLAPSED_WIDTH = 32
     EXPANDED_WIDTH = 220
@@ -241,6 +246,11 @@ class LibraryPanel(QWidget):
             self._scroll.setVisible(True)
             self._toggle_btn.setText("◀")
             self._toggle_btn.setToolTip("사이드바 접기 (Ctrl+B)")
+        # Notify whoever owns the surrounding splitter so they can
+        # redistribute the freed/reclaimed pixels. Without this the
+        # splitter keeps the cached 220px slot and our content sits
+        # flush-left inside it, defeating the whole point of collapse.
+        self.collapsed_changed.emit(self._collapsed)
 
     # --- refresh content ------------------------------------------------
 

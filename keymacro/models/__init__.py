@@ -16,6 +16,7 @@ from .action import (
     TypeAction,
     DragAction,
     WaitAction,
+    WindowResizeAction,
     Action,
 )
 from .step import Step
@@ -45,6 +46,7 @@ __all__ = [
     "HttpAction",
     "KeyAction",
     "NotifyAction",
+    "WindowResizeAction",
     "TypeAction",
     "DragAction",
     "WaitAction",

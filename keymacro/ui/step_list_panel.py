@@ -25,6 +25,9 @@ from .theme import C
 class StepListPanel(QWidget):
     add_requested = Signal()
     selected = Signal(int)
+    edit_requested = Signal(int)
+    """Forwarded from a card's "✏ 편집" button or double-click on the
+    card body. MainWindow opens the StepEditDialog for that row."""
     delete_requested = Signal(int)
     duplicate_requested = Signal(int)
     test_requested = Signal(int)
@@ -132,6 +135,7 @@ class StepListPanel(QWidget):
         for i, step in enumerate(steps):
             card = StepCard(step, i)
             card.selected.connect(self.selected)
+            card.edit_requested.connect(self.edit_requested)
             card.delete_requested.connect(self.delete_requested)
             card.duplicate_requested.connect(self.duplicate_requested)
             card.test_requested.connect(self.test_requested)

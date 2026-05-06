@@ -13,8 +13,8 @@ from typing import Optional, cast
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
-    QDoubleSpinBox,
+    QComboBox as _BaseQComboBox,
+    QDoubleSpinBox as _BaseQDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -22,11 +22,60 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
-    QSpinBox,
+    QSizePolicy,
+    QSpinBox as _BaseQSpinBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
+
+
+# Wheel-deaf variants of the input widgets.
+#
+# Two Qt defaults conspire to break form scrolling over these widgets:
+#
+# 1. ``wheelEvent`` consumes the wheel and changes the value/index.
+#    Override + ``event.ignore()`` makes the wheel propagate up to
+#    the form's QScrollArea instead. ``return True`` from an event
+#    filter would *absorb* the event and kill propagation, hence
+#    the per-widget override.
+#
+# 2. ``QAbstractSpinBox`` (parent of QSpinBox / QDoubleSpinBox) ships
+#    with focus policy ``WheelFocus`` — meaning the spinbox will
+#    *grab keyboard focus* the moment a wheel event lands on it,
+#    even if we ignored the value change. That yanks the user out of
+#    whatever line edit they were typing in. Setting focus policy
+#    back to ``StrongFocus`` keeps Tab + Click focus working but
+#    drops the wheel-grabs-focus behaviour. ``QComboBox`` is already
+#    ``StrongFocus`` by default — set it explicitly for consistency.
+#
+# Defining these locally and re-binding the public names means every
+# ``QComboBox(...)`` / ``QSpinBox(...)`` instantiation in this module
+# automatically picks up the no-wheel variant — no call-site churn.
+
+class _NoWheelMixin:
+    def wheelEvent(self, event):  # noqa: N802 — Qt override
+        # Tell Qt we didn't handle this wheel; parent ScrollArea will.
+        event.ignore()
+
+
+class QComboBox(_NoWheelMixin, _BaseQComboBox):  # type: ignore[misc]
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+
+class QSpinBox(_NoWheelMixin, _BaseQSpinBox):  # type: ignore[misc]
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Override the WheelFocus default → no focus grab on wheel.
+        self.setFocusPolicy(Qt.StrongFocus)
+
+
+class QDoubleSpinBox(_NoWheelMixin, _BaseQDoubleSpinBox):  # type: ignore[misc]
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.StrongFocus)
 
 from ..models import (
     Action,
@@ -40,6 +89,7 @@ from ..models import (
     HybridImageTrigger,
     ImageTrigger,
     NotifyAction,
+    WindowResizeAction,
     KeyAction,
     OcrTextTrigger,
     PixelColorTrigger,
@@ -71,6 +121,7 @@ _ACTION_TYPES = [
     "http",
     "call_macro",
     "notify",
+    "window_resize",
 ]
 
 # Display labels — kept separate so the combo userData stays the schema key.
@@ -99,6 +150,7 @@ _ACTION_LABELS = {
     "http": "HTTP 요청 보내기",
     "call_macro": "다른 매크로 실행",
     "notify": "외부 알림 보내기",
+    "window_resize": "창 크기/위치 조정",
 }
 
 
@@ -140,10 +192,13 @@ class StepForm(QWidget):
 
     # ----------------------------------------------------------------------
 
-    def _build_ui(self) -> None:
+    def _build_ui(self) -> None:  # noqa: D401
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(12, 10, 12, 10)
-        outer.setSpacing(10)
+        # Tight outer margins — the form lives inside a popup dialog
+        # whose own QScrollArea adds its own gutter. Compact spacing
+        # so a 520 px dialog feels packed but not crammed.
+        outer.setContentsMargins(8, 6, 8, 8)
+        outer.setSpacing(6)
 
         # General / flow group.
         general = QGroupBox("이 단계")
@@ -222,6 +277,7 @@ class StepForm(QWidget):
         self._build_http_form()
         self._build_call_macro_form()
         self._build_notify_form()
+        self._build_window_resize_form()
         av.addWidget(self.action_stack)
         outer.addWidget(act_box)
 
@@ -233,6 +289,15 @@ class StepForm(QWidget):
         self.action_type.currentIndexChanged.connect(self.action_stack.setCurrentIndex)
         self.action_type.currentIndexChanged.connect(self._emit_changed)
 
+        # Dynamic-height stacks: by default a QStackedWidget reserves
+        # vertical space for the *largest* page (so the form panel jumps
+        # to the height of `hybrid_image` even when you've selected the
+        # 1-line `time` trigger). Mark inactive pages as Ignored so the
+        # layout only follows the active page's sizeHint. The
+        # ``currentChanged`` hook keeps it that way as the user switches.
+        self._wire_dynamic_stack_height(self.trigger_stack)
+        self._wire_dynamic_stack_height(self.action_stack)
+
         for w in (
             self.id_edit, self.name_edit, self.goto, self.goto_failure,
         ):
@@ -240,6 +305,13 @@ class StepForm(QWidget):
         self.on_failure.currentIndexChanged.connect(self._emit_changed)
         self.retry_count.valueChanged.connect(self._emit_changed)
         self.repeat.valueChanged.connect(self._emit_changed)
+
+        # Wheel-blocking is handled by the local QComboBox / QSpinBox /
+        # QDoubleSpinBox subclasses defined at the top of this module —
+        # no event filters needed. See _NoWheelMixin for rationale
+        # (it has to be wheelEvent + ignore() rather than an event
+        # filter so the wheel event can propagate up to the form
+        # scroll area).
 
     # --- trigger sub-forms ------------------------------------------------
 
@@ -332,6 +404,13 @@ class StepForm(QWidget):
         w = QWidget(); f = QFormLayout(w)
         self.click_x = QSpinBox(); self.click_x.setRange(-100000, 100000)
         self.click_y = QSpinBox(); self.click_y.setRange(-100000, 100000)
+        # "🎯 현재 마우스 위치 잡기" — 5초 카운트다운 후 QCursor.pos()
+        # 캡처해서 click_x / click_y에 채움. 실험적으로 픽셀 좌표
+        # 잡기 가장 빠른 워크플로.
+        self.click_pick_btn = QPushButton("🎯 현재 마우스 위치 잡기 (5초)")
+        self.click_pick_btn.setProperty("role", "ghost")
+        self.click_pick_btn.setCursor(Qt.PointingHandCursor)
+        self.click_pick_btn.clicked.connect(self._on_pick_cursor_clicked)
         self.click_btn = _bilingual_combo([
             ("left", "왼쪽"), ("right", "오른쪽"), ("middle", "가운데"),
         ])
@@ -348,10 +427,29 @@ class StepForm(QWidget):
         for chk in (self.click_double, self.click_relative):
             chk.toggled.connect(self._emit_changed)
         f.addRow("위치 X", self.click_x); f.addRow("위치 Y", self.click_y)
+        f.addRow("", self.click_pick_btn)
         f.addRow("어느 버튼?", self.click_btn)
         f.addRow("", self.click_double); f.addRow("", self.click_relative)
         f.addRow("입력 방식", self.click_input)
         self.action_stack.addWidget(w)
+
+    def _on_pick_cursor_clicked(self) -> None:
+        """5-second countdown → capture ``QCursor.pos()`` into the
+        click_x / click_y fields. Reuses ``WindowPickerDialog`` styling
+        for consistency."""
+        from .cursor_picker import CursorPickerDialog
+        dlg = CursorPickerDialog(self)
+        dlg.picked.connect(self._on_cursor_picked)
+        dlg.show()
+
+    def _on_cursor_picked(self, x: int, y: int) -> None:
+        self.click_x.setValue(x)
+        self.click_y.setValue(y)
+        # Auto-disable "matched-position" mode — the user just told
+        # us they want absolute coords.
+        if self.click_relative.isChecked():
+            self.click_relative.setChecked(False)
+        self._emit_changed()
 
     def _build_key_form(self) -> None:
         w = QWidget(); f = QFormLayout(w)
@@ -629,9 +727,22 @@ class StepForm(QWidget):
         self.sch_at.editingFinished.connect(self._emit_changed)
         self.sch_grace.valueChanged.connect(self._emit_changed)
 
+        # Explainer for the "what happens when nothing is checked"
+        # question — the runner won't fire on unchecked weekdays. When
+        # the user clears all of them we automatically fall back to
+        # "every day" rather than silently never firing (see
+        # ``_build_trigger`` for the fallback).
+        sch_hint = QLabel(
+            "💡 체크한 요일에만 실행돼요. 모두 끄면 '매일'로 자동 처리.\n"
+            "   '늦어도 허용' = 정시에 못 깨어나도 그 초만큼 늦게는 발사."
+        )
+        sch_hint.setStyleSheet("color: #A39B85; font-size: 10px;")
+        sch_hint.setWordWrap(True)
+
         f.addRow("시각 (HH:MM)", self.sch_at)
         f.addRow("요일", days_wrap)
         f.addRow("늦어도 허용 (초)", self.sch_grace)
+        f.addRow("", sch_hint)
         self.trigger_stack.addWidget(w)
 
     def _build_extract_text_form(self) -> None:
@@ -804,6 +915,84 @@ class StepForm(QWidget):
         f.addRow("타임아웃 (초)", self.notify_timeout)
         self.action_stack.addWidget(w)
 
+    def _build_window_resize_form(self) -> None:
+        """Window resize/move editor — title match + mode + bounds.
+
+        The "🔍 창 잡기" button opens the countdown picker; on success
+        it stamps the title into ``wr_title`` and the captured bounds
+        into ``wr_x/y/w/h`` so the user can immediately switch mode to
+        ``bounds`` if they want exact-position behaviour.
+        """
+        w = QWidget(); f = QFormLayout(w)
+        self.wr_title = QLineEdit("Chrome")
+        self.wr_title.setPlaceholderText(
+            "창 제목 부분 일치 (예: Chrome, 메모장) 또는 <active>"
+        )
+        self.wr_pick_btn = QPushButton("🔍 창 잡기 (5초)")
+        self.wr_pick_btn.setProperty("role", "ghost")
+        self.wr_pick_btn.setCursor(Qt.PointingHandCursor)
+        self.wr_pick_btn.clicked.connect(self._on_pick_window_clicked)
+
+        self.wr_mode = _bilingual_combo([
+            ("fullscreen_monitor", "특정 모니터에 풀스크린"),
+            ("maximize", "최대화"),
+            ("minimize", "최소화"),
+            ("restore", "복원 (보통 크기로)"),
+            ("bounds", "정확한 위치/크기 지정"),
+        ])
+        self.wr_monitor = QSpinBox()
+        self.wr_monitor.setRange(0, 8); self.wr_monitor.setValue(0)
+        self.wr_monitor.setSuffix(" 번 모니터")
+
+        self.wr_x = QSpinBox(); self.wr_x.setRange(-100000, 100000)
+        self.wr_y = QSpinBox(); self.wr_y.setRange(-100000, 100000)
+        self.wr_w = QSpinBox(); self.wr_w.setRange(50, 100000); self.wr_w.setValue(1280)
+        self.wr_h = QSpinBox(); self.wr_h.setRange(50, 100000); self.wr_h.setValue(800)
+
+        self.wr_title.editingFinished.connect(self._emit_changed)
+        self.wr_mode.currentIndexChanged.connect(self._emit_changed)
+        self.wr_monitor.valueChanged.connect(self._emit_changed)
+        for sp in (self.wr_x, self.wr_y, self.wr_w, self.wr_h):
+            sp.valueChanged.connect(self._emit_changed)
+
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0); title_row.setSpacing(6)
+        title_row.addWidget(self.wr_title, 1)
+        title_row.addWidget(self.wr_pick_btn)
+        title_wrap = QWidget(); title_wrap.setLayout(title_row)
+
+        f.addRow("창 제목 매칭", title_wrap)
+        f.addRow("동작", self.wr_mode)
+        f.addRow("모니터 번호", self.wr_monitor)
+        f.addRow("X (모드=bounds)", self.wr_x)
+        f.addRow("Y (모드=bounds)", self.wr_y)
+        f.addRow("너비", self.wr_w)
+        f.addRow("높이", self.wr_h)
+        self.action_stack.addWidget(w)
+
+    def _on_pick_window_clicked(self) -> None:
+        """Open the 5-second countdown picker, stamp the captured title
+        + bounds into the form fields. Imported lazily so the module
+        loads on non-Windows for tests."""
+        from .window_picker import WindowPickerDialog
+        dlg = WindowPickerDialog(self)
+        dlg.picked.connect(self._on_window_picked)
+        dlg.show()
+
+    def _on_window_picked(self, title: str, x: int, y: int, w: int, h: int) -> None:
+        # Substring picker UX: store only the trimmed title so the
+        # macro doesn't break the next time the page title changes
+        # ("YouTube" instead of "Banner — YouTube"). Heuristic — take
+        # the last space-separated chunk that looks brandy.
+        cleaned = title.strip()
+        if " - " in cleaned:
+            # "Page name - Google Chrome" → keep "Google Chrome"
+            cleaned = cleaned.rsplit(" - ", 1)[-1].strip()
+        self.wr_title.setText(cleaned or title.strip())
+        self.wr_x.setValue(x); self.wr_y.setValue(y)
+        self.wr_w.setValue(w); self.wr_h.setValue(h)
+        self._emit_changed()
+
     def _build_web_click_form(self) -> None:
         w = QWidget(); f = QFormLayout(w)
         self.wc_selector = QLineEdit()
@@ -862,6 +1051,77 @@ class StepForm(QWidget):
         if self._loading:
             return
         self.step_changed.emit()
+
+    # --- dynamic stack sizing ---------------------------------------------
+
+    def _wire_dynamic_stack_height(self, stack: QStackedWidget) -> None:
+        """Make ``stack`` collapse/expand to whichever page is active.
+
+        Default ``QStackedWidget`` behaviour is to reserve vertical
+        space for the largest page across the whole stack — fine for a
+        wizard with uniformly-sized pages, ugly for our trigger /
+        action editors where ``time`` is one row and ``hybrid_image``
+        is twelve.
+
+        Trick: mark every non-current page's size policy as
+        ``Ignored`` so the layout treats them as if they had a (0, 0)
+        sizeHint. The active page keeps its real Preferred policy and
+        drives the group's height.
+
+        Performance: on every switch we only flip the *two* affected
+        pages (the previously-active one back to Ignored, the new one
+        up to Preferred) instead of walking all 9 trigger / 14 action
+        pages. The whole-stack walk used to dominate step-navigation
+        latency (~80–120 ms per switch); the two-widget version is
+        sub-millisecond.
+        """
+        # First pass: demote every page to Ignored, then promote the
+        # initial active one. Done once at construction time so
+        # subsequent switches can stay incremental.
+        for i in range(stack.count()):
+            page = stack.widget(i)
+            if page is not None:
+                page.setSizePolicy(
+                    QSizePolicy.Ignored, QSizePolicy.Ignored,
+                )
+        initial = stack.currentIndex()
+        if initial >= 0:
+            current = stack.widget(initial)
+            if current is not None:
+                current.setSizePolicy(
+                    QSizePolicy.Preferred, QSizePolicy.Preferred,
+                )
+
+        # Track the previous index so each switch only touches two
+        # widgets. Stash on the stack itself rather than ``self`` so
+        # we can wire this helper once for both stacks without
+        # juggling instance attributes.
+        stack.setProperty("_prev_active_idx", initial)
+
+        def _refresh(idx: int) -> None:
+            prev = stack.property("_prev_active_idx")
+            if prev is None:
+                prev = -1
+            if prev == idx:
+                return
+            # Demote previous, promote current.
+            if 0 <= prev < stack.count():
+                old_page = stack.widget(prev)
+                if old_page is not None:
+                    old_page.setSizePolicy(
+                        QSizePolicy.Ignored, QSizePolicy.Ignored,
+                    )
+            new_page = stack.widget(idx)
+            if new_page is not None:
+                new_page.setSizePolicy(
+                    QSizePolicy.Preferred, QSizePolicy.Preferred,
+                )
+                new_page.adjustSize()
+            stack.adjustSize()
+            stack.updateGeometry()
+            stack.setProperty("_prev_active_idx", idx)
+
+        stack.currentChanged.connect(_refresh)
 
     # --- public API -------------------------------------------------------
 
@@ -1048,6 +1308,14 @@ class StepForm(QWidget):
             self.notify_chat.setText(act.chat_id)
             self.notify_webhook.setText(act.webhook_url)
             self.notify_timeout.setValue(act.timeout_s)
+        elif isinstance(act, WindowResizeAction):
+            self.action_type.setCurrentIndex(_ACTION_TYPES.index("window_resize"))
+            self.action_stack.setCurrentIndex(_ACTION_TYPES.index("window_resize"))
+            self.wr_title.setText(act.title_match)
+            _select_data(self.wr_mode, act.mode)
+            self.wr_monitor.setValue(act.monitor_index)
+            self.wr_x.setValue(act.x); self.wr_y.setValue(act.y)
+            self.wr_w.setValue(act.w); self.wr_h.setValue(act.h)
 
     # --- snapshot -> Step --------------------------------------------------
 
@@ -1135,7 +1403,12 @@ class StepForm(QWidget):
                 poll_interval_s=self.ocr_poll.value(),
             )
         if kind == "schedule":
-            days = [i for i, cb in enumerate(self.sch_days) if cb.isChecked()] or [0]
+            days = [i for i, cb in enumerate(self.sch_days) if cb.isChecked()]
+            # Empty selection → fall back to every weekday so the
+            # macro doesn't silently never fire. The hint label under
+            # the form spells this out for the user.
+            if not days:
+                days = [0, 1, 2, 3, 4, 5, 6]
             return ScheduleTrigger(
                 at=self.sch_at.text() or "09:00",
                 weekdays=days,
@@ -1234,6 +1507,14 @@ class StepForm(QWidget):
                 chat_id=self.notify_chat.text(),
                 webhook_url=self.notify_webhook.text(),
                 timeout_s=self.notify_timeout.value(),
+            )
+        if kind == "window_resize":
+            return WindowResizeAction(
+                title_match=self.wr_title.text() or "<active>",
+                mode=cast("str", self.wr_mode.currentData() or "fullscreen_monitor"),
+                monitor_index=self.wr_monitor.value(),
+                x=self.wr_x.value(), y=self.wr_y.value(),
+                w=self.wr_w.value(), h=self.wr_h.value(),
             )
         # extract_text
         return ExtractTextAction(

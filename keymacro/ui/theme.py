@@ -495,16 +495,16 @@ QGroupBox {{
     background-color: {C['surface-container-low']};
     border: 1px solid {C['outline-variant']};
     border-radius: {R['md']}px;
-    margin-top: 14px;
-    padding: 16px 12px 12px 12px;
+    margin-top: 10px;
+    padding: 12px 8px 8px 8px;
     font-size: 10px; font-weight: 700; letter-spacing: 0.8px;
     color: {C['on-surface-variant']};
 }}
 QGroupBox::title {{
     subcontrol-origin: margin;
     subcontrol-position: top left;
-    padding: 0 6px;
-    left: 10px;
+    padding: 0 4px;
+    left: 8px;
 }}
 
 /* === transport bar (sticky bottom) =================================== */
@@ -596,22 +596,34 @@ QFormLayout QLabel {{
 
 /* === toasts (top-right floating notifications) ======================= */
 
+/* Toast cards float above the keymacro form pane, which uses similar
+ * dark surfaces. Make them visually distinct via three reinforcing
+ * channels: (1) a high-contrast pale outline so the card edges are
+ * always visible, (2) a thick coloured accent stripe whose hue maps
+ * to severity, (3) a drop-shadow (configured in ``toast.py``) that
+ * lifts the card off the background. Bigger padding and a slightly
+ * darker fill than the form chrome give the body text real
+ * breathing room. */
 QWidget[role="toast"] {{
-    background-color: {C['surface-container-high']};
-    border: 1px solid {C['outline-variant']};
-    border-radius: {R['md']}px;
+    background-color: {C['surface']};
+    border: 2px solid {C['on-surface-variant']};
+    border-radius: 10px;
 }}
 QWidget[role="toast"][kind="success"] {{
-    border-left: 3px solid {C['tertiary']};
+    border: 2px solid {C['tertiary']};
+    border-left: 6px solid {C['tertiary']};
 }}
 QWidget[role="toast"][kind="info"] {{
-    border-left: 3px solid {C['secondary']};
+    border: 2px solid {C['secondary']};
+    border-left: 6px solid {C['secondary']};
 }}
 QWidget[role="toast"][kind="warning"] {{
-    border-left: 3px solid {C['primary']};
+    border: 2px solid {C['primary']};
+    border-left: 6px solid {C['primary']};
 }}
 QWidget[role="toast"][kind="error"] {{
-    border-left: 3px solid {C['quaternary']};
+    border: 2px solid {C['quaternary']};
+    border-left: 6px solid {C['quaternary']};
 }}
 QWidget[role="toast"] QPushButton#toastClose {{
     color: {C['on-surface-variant']};

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -57,7 +58,7 @@ from .picker_thread import PickerThread
 from .recorder_controller import RecorderController
 from .region_picker import RegionPickerOverlay
 from .runner_thread import RunnerThread
-from .step_form import StepForm
+from .step_edit_dialog import StepEditDialog
 from .step_list_panel import StepListPanel
 from .template_capture import capture_template
 from .theme import C, apply_theme
@@ -132,7 +133,11 @@ class MainWindow(QMainWindow):
     def __init__(self, *, debug_capture_dir: Optional[Path] = None) -> None:
         super().__init__()
         self.setWindowTitle("작업대 · keymacro")
-        self.resize(1280, 700)
+        # Compact main window — the form lives in a popup dialog now,
+        # so this side only needs room for the library + step list.
+        # ~600 px is the user-confirmed target ("매크로 앱이지 모니터링
+        # 앱이 아니다"); they can always drag wider if they want.
+        self.resize(600, 720)
 
         self._macro: Macro = _empty_macro()
         self._macro_path: Optional[Path] = None
@@ -219,6 +224,49 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_toast"):
             self._toast.error(message)
 
+    # --- step-edit dialog (popup form) ----------------------------------
+
+    def _ensure_form_dialog(self) -> StepEditDialog:
+        """Create the popup edit dialog on first use, then reuse.
+
+        The dialog hosts the same :class:`StepForm` widget the main
+        window used to embed in its right-hand splitter slot. We wire
+        its signals once at creation time so the rest of MainWindow
+        can keep talking to ``self.form`` (the property below)
+        regardless of whether the form is currently visible."""
+        if self._form_dialog is None:
+            self._form_dialog = StepEditDialog(self)
+            self._form_dialog.step_changed.connect(self._on_form_changed)
+            self._form_dialog.pick_region_requested.connect(self._pick_region)
+            self._form_dialog.capture_template_requested.connect(
+                self._capture_template,
+            )
+            self._form_dialog.pick_web_selector_requested.connect(
+                self._on_pick_web_selector,
+            )
+        return self._form_dialog
+
+    @property
+    def form(self):
+        """Backwards-compatible alias for the inner ``StepForm``.
+
+        Older call sites read ``self.form.set_template``, etc. — the
+        dialog is created lazily on first access so this stays cheap."""
+        return self._ensure_form_dialog().form
+
+    def _open_step_editor(self, row: int) -> None:
+        """Show the popup editor with the macro step at ``row``."""
+        if not (0 <= row < len(self._macro.steps)):
+            return
+        dlg = self._ensure_form_dialog()
+        dlg.load_step(self._macro.steps[row], row)
+        # Ensure the list highlight follows the editor — keeps the
+        # main window and the dialog in lockstep.
+        self.list_panel.set_selected(row)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
     # --- UI assembly ----------------------------------------------------
 
     def _build_ui(self) -> None:
@@ -237,7 +285,11 @@ class MainWindow(QMainWindow):
 
         outer.addLayout(self._build_toolbar())
 
-        # Body splitter — 3 panes: library / step list / form
+        # Body splitter — 2 panes: library / step list. The form
+        # used to live in a third right-hand pane that pinned the
+        # whole window to ~1100 px wide; we moved it into a popup
+        # ``StepEditDialog`` so the main surface can stay compact
+        # (closer to the 600 px common in other macro tools).
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(1)
 
@@ -247,20 +299,25 @@ class MainWindow(QMainWindow):
         self.list_panel = StepListPanel()
         splitter.addWidget(self.list_panel)
 
-        # Right side: scrollable form
-        self.form_scroll = QScrollArea()
-        self.form_scroll.setWidgetResizable(True)
-        self.form_scroll.setFrameShape(QFrame.NoFrame)
-        self.form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.form = StepForm()
-        self.form_scroll.setWidget(self.form)
-        splitter.addWidget(self.form_scroll)
-
         splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 4)
-        splitter.setStretchFactor(2, 6)
-        splitter.setSizes([220, 440, 600])
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([200, 340])
+        # Step-list pane: 230 px is enough for a card with the
+        # icon-only action buttons. Lower minimums don't help — the
+        # number / badge / name row stops being readable below ~210.
+        self.list_panel.setMinimumWidth(230)
+        splitter.setCollapsible(1, False)
+        # Stash the splitter so the library-collapse handler can
+        # redistribute pane sizes when the user clicks ◀ / ▶.
+        self._body_splitter = splitter
         outer.addWidget(splitter, 1)
+
+        # Lazily-created modeless edit dialog. Created on first need
+        # so startup stays fast, then reused across every "edit step"
+        # invocation. ``self.form`` resolves to the dialog's inner
+        # form widget so older call sites that reach in via
+        # ``self.form.set_template`` etc. keep working.
+        self._form_dialog: Optional[StepEditDialog] = None
 
         self.transport = TransportBar()
         outer.addWidget(self.transport)
@@ -310,24 +367,24 @@ class MainWindow(QMainWindow):
                 b.setToolTip(tip)
             return b
 
+        # Toolbar trimmed to the everyday actions: 새로 / 열기 / 저장
+        # / Chrome / 녹화 / ⋮. Less-frequent commands (다른 이름,
+        # .kma 내보내기/가져오기, 이력) live under the ⋮ menu so the
+        # whole bar fits inside a 600 px window. Each command still
+        # has a keyboard shortcut and the ⋮ menu surfaces them.
         self.btn_new = gh("새로", "새 매크로 (Ctrl+N)")
         self.btn_open = gh("열기", "매크로 열기 (Ctrl+O)")
         self.btn_save = gh("저장", "저장 (Ctrl+S)")
-        self.btn_save_as = gh("다른 이름", "다른 이름으로 저장")
-        self.btn_export = gh(".kma 내보내기", "매크로 + 템플릿을 단일 파일로")
-        self.btn_import = gh(".kma 가져오기", ".kma 묶음 풀어 불러오기")
-        for b in (
-            self.btn_new, self.btn_open, self.btn_save, self.btn_save_as,
-            self.btn_export, self.btn_import,
-        ):
+        for b in (self.btn_new, self.btn_open, self.btn_save):
             row.addWidget(b)
         row.addStretch()
 
         # Chrome status pill — sage when CDP port 9222 is listening.
-        self.btn_chrome = QPushButton("○  Chrome 시작")
+        # Shorter label ("○ Chrome") to fit the compact bar; the
+        # tooltip carries the long-form explanation.
+        self.btn_chrome = QPushButton("○  Chrome")
         self.btn_chrome.setProperty("role", "ghost")
         self.btn_chrome.setProperty("state", "idle")
-        self.btn_chrome.setMinimumWidth(140)
         self.btn_chrome.setCursor(Qt.PointingHandCursor)
         self.btn_chrome.setToolTip(
             "디버그 모드 Chrome 띄우기 — 웹 매크로 / 요소 picker가 여기에 연결됨"
@@ -335,10 +392,9 @@ class MainWindow(QMainWindow):
         self.btn_chrome.clicked.connect(self._on_chrome_launch_clicked)
         row.addWidget(self.btn_chrome)
 
-        # Recorder + history buttons — sit alongside the Chrome status pill.
+        # Recorder button — same compact treatment.
         self.btn_record = QPushButton("●  녹화")
         self.btn_record.setProperty("role", "ghost")
-        self.btn_record.setMinimumWidth(110)
         self.btn_record.setCursor(Qt.PointingHandCursor)
         self.btn_record.setToolTip(
             "마우스 / 키보드 입력을 기록해 매크로 자동 생성. F8로 정지",
@@ -346,12 +402,35 @@ class MainWindow(QMainWindow):
         self.btn_record.clicked.connect(self._on_record_toggle)
         row.addWidget(self.btn_record)
 
-        self.btn_history = QPushButton("이력")
-        self.btn_history.setProperty("role", "ghost")
-        self.btn_history.setCursor(Qt.PointingHandCursor)
-        self.btn_history.setToolTip("최근 매크로 실행 기록 보기")
-        self.btn_history.clicked.connect(self._on_show_history)
-        row.addWidget(self.btn_history)
+        # "더보기 ⋮" — overflow menu for the rest. Stays out of the
+        # toolbar's main width budget while keeping every command a
+        # single click + scroll away.
+        self.btn_more = QPushButton("⋮")
+        self.btn_more.setProperty("role", "ghost")
+        self.btn_more.setCursor(Qt.PointingHandCursor)
+        self.btn_more.setToolTip("더 많은 작업")
+        self.btn_more.setFixedWidth(32)
+        more_menu = QMenu(self.btn_more)
+        act_save_as = more_menu.addAction("다른 이름으로 저장…")
+        act_save_as.triggered.connect(self._on_save_as)
+        more_menu.addSeparator()
+        act_export = more_menu.addAction(".kma 내보내기")
+        act_export.triggered.connect(self._on_export)
+        act_import = more_menu.addAction(".kma 가져오기")
+        act_import.triggered.connect(self._on_import)
+        more_menu.addSeparator()
+        act_history = more_menu.addAction("실행 이력")
+        act_history.triggered.connect(self._on_show_history)
+        self.btn_more.setMenu(more_menu)
+        row.addWidget(self.btn_more)
+
+        # Keep the legacy attribute names alive for older call sites
+        # (signal wiring below uses ``self.btn_save_as`` etc.). They
+        # point at the same QAction objects so triggering them works.
+        self.btn_save_as = act_save_as
+        self.btn_export = act_export
+        self.btn_import = act_import
+        self.btn_history = act_history
 
         # Refresh status every 4 seconds (port liveness probe is cheap).
         from PySide6.QtCore import QTimer
@@ -387,12 +466,14 @@ class MainWindow(QMainWindow):
         self.btn_new.clicked.connect(self._on_new)
         self.btn_open.clicked.connect(self._on_open)
         self.btn_save.clicked.connect(self._on_save)
-        self.btn_save_as.clicked.connect(self._on_save_as)
-        self.btn_export.clicked.connect(self._on_export)
-        self.btn_import.clicked.connect(self._on_import)
+        # ``btn_save_as`` / ``btn_export`` / ``btn_import`` /
+        # ``btn_history`` are now QAction objects living under the ⋮
+        # menu — they wire themselves at construction time. Nothing
+        # extra to connect here.
 
         self.list_panel.add_requested.connect(self._on_add_step)
         self.list_panel.selected.connect(self._on_step_selected)
+        self.list_panel.edit_requested.connect(self._open_step_editor)
         self.list_panel.delete_requested.connect(self._on_remove_step)
         self.list_panel.duplicate_requested.connect(self._on_duplicate_step)
         self.list_panel.test_requested.connect(self._on_test_step)
@@ -401,10 +482,9 @@ class MainWindow(QMainWindow):
         self.list_panel.reorder_requested.connect(self._on_reorder_steps)
         self.list_panel.examples_requested.connect(self._on_browse_examples)
 
-        self.form.step_changed.connect(self._on_form_changed)
-        self.form.pick_region_requested.connect(self._pick_region)
-        self.form.capture_template_requested.connect(self._capture_template)
-        self.form.pick_web_selector_requested.connect(self._on_pick_web_selector)
+        # Form signals are wired inside ``_ensure_form_dialog`` when
+        # the popup is first created — there's no embedded form on
+        # the main window any more.
 
         self.transport.start_requested.connect(self._on_start)
         self.transport.stop_requested.connect(self._on_stop)
@@ -445,6 +525,7 @@ class MainWindow(QMainWindow):
         self.library_panel.reveal_requested.connect(self._on_library_reveal)
         self.library_panel.folder_added.connect(self._on_library_folder_added)
         self.library_panel.folder_removed.connect(self._on_library_folder_removed)
+        self.library_panel.collapsed_changed.connect(self._on_library_collapsed_changed)
 
     def _setup_hotkeys(self) -> None:
         self._hotkeys = HotkeyManager(
@@ -510,14 +591,19 @@ class MainWindow(QMainWindow):
         )
         self._refresh_transport_kind_lookup()
         self._refresh_preflight_issues()
-        if self._macro.steps:
-            self.form_scroll.setVisible(True)
-            self.form.load_step(self._macro.steps[
-                self.list_panel.selected_row() if self.list_panel.selected_row() >= 0
-                else 0
-            ])
-        else:
-            self.form_scroll.setVisible(False)
+        # If the edit dialog is open, refresh its contents so the user
+        # sees the same step the list highlights. If it's closed we
+        # leave it alone — the user will reopen it explicitly.
+        if (
+            self._form_dialog is not None
+            and self._form_dialog.isVisible()
+            and self._macro.steps
+        ):
+            row = self.list_panel.selected_row()
+            if row < 0:
+                row = 0
+            if 0 <= row < len(self._macro.steps):
+                self._form_dialog.load_step(self._macro.steps[row], row)
         self._update_title()
 
     def _refresh_preflight_issues(self) -> None:
@@ -550,17 +636,27 @@ class MainWindow(QMainWindow):
         self._load_macro_from_path(Path(path))
 
     def _on_step_selected(self, row: int) -> None:
+        """Single click on a card → highlight it. If the editor dialog
+        is already open, swap its contents to the newly-selected step
+        so the popup tracks the user's focus without forcing them to
+        double-click again."""
         self.list_panel.set_selected(row)
-        if 0 <= row < len(self._macro.steps):
-            self.form_scroll.setVisible(True)
-            self.form.load_step(self._macro.steps[row])
+        if not (0 <= row < len(self._macro.steps)):
+            return
+        if self._form_dialog is not None and self._form_dialog.isVisible():
+            self._form_dialog.load_step(self._macro.steps[row], row)
 
     def _on_form_changed(self) -> None:
-        idx = self.list_panel.selected_row()
+        # The dialog tracks which step it's editing — read it directly
+        # rather than the list selection, which can drift if the user
+        # clicks a different card while the dialog is open.
+        if self._form_dialog is None:
+            return
+        idx = self._form_dialog.current_row()
         if idx < 0 or idx >= len(self._macro.steps):
             return
         try:
-            new_step = self.form.to_step()
+            new_step = self._form_dialog.to_step()
         except Exception:
             return
         if new_step != self._macro.steps[idx]:
@@ -627,7 +723,11 @@ class MainWindow(QMainWindow):
         self._snapshot_macro()
         self._macro.steps.append(new_step)
         self._dirty = True
-        self._reload_step_list(select_index=len(self._macro.steps) - 1)
+        new_idx = len(self._macro.steps) - 1
+        self._reload_step_list(select_index=new_idx)
+        # Just-added steps almost always need editing — pop the
+        # editor immediately so the user lands on the right form.
+        self._open_step_editor(new_idx)
 
     def _on_remove_step(self, row: int) -> None:
         if not (0 <= row < len(self._macro.steps)):
@@ -862,6 +962,34 @@ class MainWindow(QMainWindow):
                 subprocess.Popen(["xdg-open", str(Path(path).parent)])
         except Exception as e:
             log.warning("could not reveal %s: %s", path, e)
+
+    def _on_library_collapsed_changed(self, collapsed: bool) -> None:
+        """Redistribute the body splitter when the library pane folds.
+
+        QSplitter caches per-pane sizes; setting the panel's max width
+        clamps how big the library *can* draw but leaves the splitter
+        slot at the cached 220px. We have to call ``setSizes()`` again
+        to actually reclaim the space."""
+        if not hasattr(self, "_body_splitter"):
+            return
+        sizes = self._body_splitter.sizes()
+        if len(sizes) != 2:
+            return
+        if collapsed:
+            # Shrink library to the rail, hand the freed pixels to the
+            # step list (the only other pane in the post-popup layout).
+            freed = sizes[0] - LibraryPanel.COLLAPSED_WIDTH
+            self._body_splitter.setSizes([
+                LibraryPanel.COLLAPSED_WIDTH,
+                sizes[1] + freed,
+            ])
+        else:
+            # Expand library back, taking pixels from the step list.
+            grow = LibraryPanel.EXPANDED_WIDTH - sizes[0]
+            self._body_splitter.setSizes([
+                LibraryPanel.EXPANDED_WIDTH,
+                max(280, sizes[1] - grow),
+            ])
 
     def _on_library_folder_added(self, folder: str) -> None:
         self._library.add_folder(folder)

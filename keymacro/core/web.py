@@ -114,6 +114,13 @@ class PlaywrightPage:
         self, selector: str, *,
         button: str = "left", double: bool = False, force: bool = False,
     ) -> None:
+        # Same reasoning as ``navigate``: ensure the user can see the
+        # click happen, otherwise an attached Chrome that's behind the
+        # GUI fires the click on a hidden tab.
+        try:
+            self._page.bring_to_front()
+        except Exception:
+            log.debug("bring_to_front before click failed", exc_info=True)
         loc = self._page.locator(selector)
         if double:
             loc.dblclick(button=button, force=force)
@@ -121,6 +128,10 @@ class PlaywrightPage:
             loc.click(button=button, force=force)
 
     def fill(self, selector: str, text: str, *, delay_ms: int = 0) -> None:
+        try:
+            self._page.bring_to_front()
+        except Exception:
+            log.debug("bring_to_front before fill failed", exc_info=True)
         loc = self._page.locator(selector)
         if delay_ms > 0:
             loc.click()
@@ -129,6 +140,27 @@ class PlaywrightPage:
             loc.fill(text)
 
     def navigate(self, url: str, *, wait_until: str = "load") -> None:
+        # Bring the tab (and its parent Chrome window) to the front
+        # *every* navigation, not just at session start. In attach mode
+        # the user often has the keymacro GUI focused; without this the
+        # goto succeeds CDP-side but the user never sees the new page
+        # because Chrome stayed behind keymacro and the macro reports
+        # "complete" while the user thinks nothing happened.
+        try:
+            self._page.bring_to_front()
+        except Exception:
+            log.debug("bring_to_front before navigate failed", exc_info=True)
+        # If the user is already on the target URL, ``goto`` is a no-op
+        # in Chromium (no fresh load fires) and the user perceives
+        # "nothing happened — macro is broken". Force a real reload in
+        # that case so the macro produces a visible side effect.
+        try:
+            current = (self._page.url or "").rstrip("/")
+        except Exception:
+            current = ""
+        if current and current == url.rstrip("/"):
+            self._page.reload(wait_until=wait_until)
+            return
         self._page.goto(url, wait_until=wait_until)
 
     def screenshot(self, path: str) -> None:
@@ -181,10 +213,26 @@ class PlaywrightSession:
                 self._context = self._browser.new_context()
             else:
                 self._context = self._browser.contexts[0]
-            if self.config.new_page or not self._context.pages:
+            # Pick a *user* page — Chrome's CDP exposes internal targets
+            # like ``chrome://omnibox-popup.top-chrome/``, the DevTools
+            # surface, extension service workers, etc. Without filtering
+            # we'd grab whichever happens to be ``pages[0]`` and
+            # navigate it instead of the user's actual tab. Real-world
+            # symptom: matching the loginForm tab one run, the omnibox
+            # popup the next, "macro doesn't navigate."
+            if self.config.new_page:
                 self._page = self._context.new_page()
             else:
-                self._page = self._context.pages[0]
+                self._page = self._pick_user_page()
+                if self._page is None:
+                    # No real http(s) tab found anywhere — open a fresh
+                    # one in the default context so we have something to
+                    # drive.
+                    self._page = self._context.new_page()
+                else:
+                    # Update _context to whichever owns the picked page,
+                    # so subsequent operations stay coherent.
+                    self._context = self._page.context
                 try:
                     self._page.bring_to_front()
                 except Exception:
@@ -201,6 +249,43 @@ class PlaywrightSession:
             "web session started: mode=%s url=%s",
             self.config.mode, self._page.url if self._page else "?",
         )
+
+    # System schemes Chrome / Chromium / Edge expose as CDP targets but
+    # which are never the user's actual tab. Filter them out when
+    # picking the attach target.
+    _SYSTEM_URL_PREFIXES = (
+        "chrome://",
+        "chrome-extension://",
+        "chrome-untrusted://",
+        "chrome-search://",
+        "devtools://",
+        "edge://",
+        "view-source:",
+    )
+
+    def _pick_user_page(self):
+        """Walk every context's pages and return the first http(s) tab.
+
+        Falls back to ``about:blank`` / empty pages only if no real http
+        tab exists anywhere — those at least belong to the user's
+        browser window, unlike the chrome:// internals.
+        """
+        if self._browser is None:
+            return None
+        # First pass: prefer real http(s) tabs.
+        for ctx in self._browser.contexts:
+            for page in ctx.pages:
+                url = (page.url or "").lower()
+                if url.startswith(("http://", "https://", "file://")):
+                    return page
+        # Second pass: take any non-system page.
+        for ctx in self._browser.contexts:
+            for page in ctx.pages:
+                url = (page.url or "").lower()
+                if not any(url.startswith(p) for p in self._SYSTEM_URL_PREFIXES):
+                    return page
+        # All pages are system pages — caller will create a new one.
+        return None
 
     def page(self) -> WebPage:
         if self._page is None:

@@ -82,21 +82,28 @@ class TransportBar(QFrame):
         layout.setContentsMargins(14, 10, 14, 10)
         layout.setSpacing(8)
 
+        # Hotkey labels visible on the buttons themselves so the user
+        # doesn't have to memorize them — the F-row is the same as
+        # ``HotkeyManager`` registers (F9/F10/F11). Tooltips repeat
+        # the binding for users who hover before clicking.
         self._play_btn = QPushButton("▶  시작 (F9)")
         self._play_btn.setProperty("role", "transport-play")
         self._play_btn.setCursor(Qt.PointingHandCursor)
+        self._play_btn.setToolTip("매크로 시작 (F9)")
         self._play_btn.clicked.connect(self.start_requested)
         layout.addWidget(self._play_btn)
 
-        self._pause_btn = QPushButton("⏸  일시정지")
+        self._pause_btn = QPushButton("⏸  일시정지 (F11)")
         self._pause_btn.setProperty("role", "transport-ghost")
         self._pause_btn.setCursor(Qt.PointingHandCursor)
+        self._pause_btn.setToolTip("일시정지 / 재개 (F11)")
         self._pause_btn.clicked.connect(self.pause_requested)
         layout.addWidget(self._pause_btn)
 
-        self._stop_btn = QPushButton("■  정지")
+        self._stop_btn = QPushButton("■  정지 (F10)")
         self._stop_btn.setProperty("role", "transport-ghost")
         self._stop_btn.setCursor(Qt.PointingHandCursor)
+        self._stop_btn.setToolTip("매크로 정지 (F10)")
         self._stop_btn.clicked.connect(self.stop_requested)
         layout.addWidget(self._stop_btn)
 

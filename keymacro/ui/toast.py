@@ -24,17 +24,15 @@ from __future__ import annotations
 from typing import Final, Literal
 
 from PySide6.QtCore import (
-    QEasingCurve,
     QObject,
-    QPropertyAnimation,
     QRect,
     QSize,
     Qt,
     QTimer,
 )
-from PySide6.QtGui import QCursor
+from PySide6.QtGui import QColor, QCursor
 from PySide6.QtWidgets import (
-    QGraphicsOpacityEffect,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -112,23 +110,19 @@ class Toast(QWidget):
         self.setFixedWidth(_TOAST_WIDTH)
         self.adjustSize()
 
-        # Opacity effect drives the fade-in / fade-out animations. We hold
-        # references on self so Python doesn't garbage-collect them mid-anim.
-        self._fx = QGraphicsOpacityEffect(self)
-        self._fx.setOpacity(0.0)
-        self.setGraphicsEffect(self._fx)
-        self._fade_in = QPropertyAnimation(self._fx, b"opacity", self)
-        self._fade_in.setDuration(180)
-        self._fade_in.setStartValue(0.0)
-        self._fade_in.setEndValue(1.0)
-        self._fade_in.setEasingCurve(QEasingCurve.OutCubic)
-
-        self._fade_out = QPropertyAnimation(self._fx, b"opacity", self)
-        self._fade_out.setDuration(220)
-        self._fade_out.setStartValue(1.0)
-        self._fade_out.setEndValue(0.0)
-        self._fade_out.setEasingCurve(QEasingCurve.InCubic)
-        self._fade_out.finished.connect(self._finalize)
+        # Drop-shadow effect makes the toast pop visibly out of the
+        # underlying form (which uses similar dark surface colours),
+        # giving the alert real visual weight. We dropped the
+        # opacity-fade animation because Qt only allows one
+        # QGraphicsEffect per widget and a sharp crisp toast that
+        # appears instantly is more legible than a soft fade-in
+        # anyway — fades trade legibility for polish, and the user
+        # explicitly said the toasts were hard to read.
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(20)
+        shadow.setOffset(0, 4)
+        shadow.setColor(QColor(0, 0, 0, 180))
+        self.setGraphicsEffect(shadow)
 
         # Auto-dismiss timer — single shot, stopped if the user clicks ×.
         self._auto = QTimer(self)
@@ -143,7 +137,6 @@ class Toast(QWidget):
     def reveal(self) -> None:
         self.show()
         self.raise_()
-        self._fade_in.start()
         self._auto.start()
 
     def dismiss(self) -> None:
@@ -151,7 +144,8 @@ class Toast(QWidget):
             return
         self._dismissing = True
         self._auto.stop()
-        self._fade_out.start()
+        # Direct removal — see ``__init__`` for why we don't fade.
+        self._finalize()
 
     def mousePressEvent(self, event):  # noqa: N802 — Qt override
         # Click anywhere on the body dismisses too.

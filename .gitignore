@@ -33,3 +33,6 @@ logs/
 debug_captures/
 *.debug.png
 .tmp/
+
+# Local IDE / Claude harness configs
+.claude/

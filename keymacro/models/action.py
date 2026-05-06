@@ -158,6 +158,48 @@ class NotifyAction(BaseModel):
         return v
 
 
+_WindowMode = Literal[
+    "bounds", "maximize", "minimize", "restore",
+    "fullscreen_monitor",
+]
+
+
+class WindowResizeAction(BaseModel):
+    """Move / resize a top-level OS window (Windows only).
+
+    The window is selected by ``title_match`` — a case-insensitive
+    substring of the window title. ``"<active>"`` is a sentinel meaning
+    "whichever window currently has focus". Common matches:
+        - ``"Chrome"`` → first Chrome window
+        - ``"Google Chrome"`` → same, more specific
+        - ``"강의"`` → 한국어 페이지 제목에 "강의" 들어간 창 (학습 사이트)
+        - ``"메모장"``
+
+    Modes:
+        - ``bounds``: place at exact ``(x, y, w, h)``. Coordinates are
+          virtual-desktop (negative x lands the window on a monitor
+          left of the primary). Lets the macro position a window on a
+          secondary monitor by giving its coordinates directly.
+        - ``maximize`` / ``minimize`` / ``restore``: ShowWindow commands
+        - ``fullscreen_monitor``: cover monitor ``monitor_index`` work
+          area (taskbar still visible). Index 0 is whichever monitor
+          Windows enumerated first; ``list_monitors()`` shows them in
+          order. Out-of-range index falls back to the primary monitor.
+    """
+
+    type: Literal["window_resize"] = "window_resize"
+    title_match: str = "<active>"
+    """Substring match against window title, or ``<active>`` for the
+    foreground window at the time the action runs."""
+    mode: _WindowMode = "bounds"
+    x: int = 0
+    y: int = 0
+    w: int = 1280
+    h: int = 800
+    monitor_index: int = 0
+    """Used by ``mode='fullscreen_monitor'``."""
+
+
 class CallMacroAction(BaseModel):
     """Run another macro file as if its steps were inlined here.
 
@@ -298,6 +340,7 @@ Action = Annotated[
         HttpAction,
         CallMacroAction,
         NotifyAction,
+        WindowResizeAction,
         WebClickAction,
         WebTypeAction,
         WebNavigateAction,

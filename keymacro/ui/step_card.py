@@ -11,8 +11,10 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QMimeData, QPoint, QSize, Qt, Signal
-from PySide6.QtGui import QAction, QDrag, QFontMetrics
+from PySide6.QtCore import QMimeData, QPoint, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import (
+    QAction, QColor, QDrag, QFontMetrics, QPainter, QPainterPath, QPen,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -43,6 +45,7 @@ from ..models import (
     ImageTrigger,
     KeyAction,
     NotifyAction,
+    WindowResizeAction,
     OcrTextTrigger,
     PixelColorTrigger,
     ScheduleTrigger,
@@ -204,6 +207,19 @@ def action_sentence(action: Action) -> str:
             "discord": "Discord", "kakao_work": "카카오워크",
         }.get(action.provider, action.provider)
         return f"→ {provider_kr} 알림: \"{text}\""
+    if isinstance(action, WindowResizeAction):
+        target = "활성 창" if action.title_match.strip() == "<active>" else f"창 '{action.title_match}'"
+        if action.mode == "bounds":
+            return f"→ {target} 을 ({action.x},{action.y}) {action.w}×{action.h}로 옮기기"
+        if action.mode == "maximize":
+            return f"→ {target} 최대화"
+        if action.mode == "minimize":
+            return f"→ {target} 최소화"
+        if action.mode == "restore":
+            return f"→ {target} 복원"
+        if action.mode == "fullscreen_monitor":
+            return f"→ {target} 을 모니터 {action.monitor_index}번에 풀스크린"
+        return f"→ {target} 조정"
     return "→ (알 수 없는 동작)"
 
 
@@ -225,37 +241,28 @@ def _meta_tags(step: Step) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-class StepStripe(QFrame):
-    """The 3px (4px when active) coloured bar on top of a step card."""
-
-    def __init__(self, kind: str, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self.setFixedHeight(3)
-        self._apply(kind)
-
-    def _apply(self, kind: str, active: bool = False) -> None:
-        self.setStyleSheet(
-            f"background-color: {STRIPE.get(kind, C['outline'])};"
-            f" border: none;"
-            f" border-top-left-radius: 10px;"
-            f" border-top-right-radius: 10px;"
-        )
-        self.setFixedHeight(4 if active else 3)
-
-    def set_kind(self, kind: str) -> None:
-        self._apply(kind, self.height() >= 4)
-
-    def set_active(self, active: bool) -> None:
-        # Re-derive kind from current colour by walking the stripe map; cheap.
-        for k, v in STRIPE.items():
-            if v in self.styleSheet():
-                self._apply(k, active)
-                return
-        self._apply("image", active)
+# Card visuals (stripe + outline + background) are drawn in a single
+# overridden ``paintEvent`` rather than via QSS. Why:
+#
+#   - QSS rounded-rect outlines and inset child widgets paint in
+#     separate passes, so the stripe's top corners and the card's
+#     rounded outline never landed on exactly the same pixels — the
+#     1 px gap was visible on every corner.
+#   - QSS border-radius rendering on QFrame can also miss the corner
+#     antialiasing pixels under certain DPI settings, leaving the
+#     four corners looking "잘린 듯" even without a stripe.
+#
+# Drawing everything inside one ``QPainter`` call with
+# ``Antialiasing`` on, sharing the same ``QPainterPath`` for the
+# rounded card outline AND for clipping the stripe, makes corner
+# alignment automatic — they're literally the same geometry.
 
 
 class StepCard(QFrame):
     selected = Signal(int)
+    edit_requested = Signal(int)
+    """Fired by the "✏ 편집" button or by a double-click on the card.
+    The host opens a :class:`StepEditDialog` for this row."""
     delete_requested = Signal(int)
     duplicate_requested = Signal(int)
     test_requested = Signal(int)
@@ -284,7 +291,13 @@ class StepCard(QFrame):
         self.customContextMenuRequested.connect(self._on_context_menu)
         self._row = row
         self._step = step
+        self._kind = _trigger_kind(step)
         self._drag_start = None
+        self._hover = False
+        # Painted entirely in our ``paintEvent`` — disable Qt's
+        # built-in styled-background drawing so the QSS rule from
+        # theme.py doesn't paint a frame underneath ours.
+        self.setAttribute(Qt.WA_StyledBackground, False)
         self._build_ui()
         self._refresh()
 
@@ -298,15 +311,14 @@ class StepCard(QFrame):
 
     def set_active(self, active: bool) -> None:
         self.setProperty("state", "active" if active else "idle")
-        self._stripe.set_active(active)
-        self._reapply_style()
+        self._apply_card_style()
 
     def set_error(self, error: bool, *, with_capture: bool = False) -> None:
         self.setProperty("state", "error" if error else "idle")
         # Surface the inline preview button only when we actually have a
         # cached image to show — otherwise the button is just noise.
         self._preview_btn.setVisible(error and with_capture)
-        self._reapply_style()
+        self._apply_card_style()
 
     def set_issues(self, issues: list[StepIssue]) -> None:
         """Populate the inline preflight badges. Pass ``[]`` to clear.
@@ -350,22 +362,30 @@ class StepCard(QFrame):
             self.setProperty(
                 "state", "error" if has_error else "idle",
             )
-            self._reapply_style()
+            self._apply_card_style()
 
     # --- assembly -------------------------------------------------------
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        # Top inset matches the painted stripe height (3 px idle, 4 px
+        # active) so child widgets never overlap the coloured band.
+        # We intentionally leave the value at 4 — when the stripe
+        # shrinks back to 3 in idle, the extra 1 px of top padding is
+        # invisible and we avoid jiggling the body widgets on every
+        # selection change.
+        layout.setContentsMargins(0, 4, 0, 0)
         layout.setSpacing(0)
 
-        self._stripe = StepStripe(_trigger_kind(self._step), self)
-        layout.addWidget(self._stripe)
+        # No stripe child widget — see the module-level comment.
+        # The trigger-kind colour is drawn directly in ``paintEvent``
+        # using the same QPainterPath as the card outline so the
+        # corners share geometry to the pixel.
 
         body = QWidget(self)
         body_l = QVBoxLayout(body)
-        body_l.setContentsMargins(12, 8, 10, 10)
-        body_l.setSpacing(4)
+        body_l.setContentsMargins(10, 4, 6, 8)
+        body_l.setSpacing(3)
 
         # --- top row: STEP nn · badge · name ……  복제 삭제 ----------------
         top = QHBoxLayout()
@@ -389,12 +409,23 @@ class StepCard(QFrame):
         )
         top.addWidget(self._title_lbl, 1)
 
-        # Hidden by default — toggled visible only when ``set_error(error,
-        # with_capture=True)`` runs after the runner emits failure_capture.
-        self._preview_btn = QPushButton("📷 실패 화면")
-        self._preview_btn.setProperty("role", "icon-mini")
-        self._preview_btn.setCursor(Qt.PointingHandCursor)
-        self._preview_btn.setToolTip(
+        # Action buttons are icon-only so the card row stays narrow
+        # enough for ~340 px wide step list panes. Each button has a
+        # ``setToolTip`` carrying the long-form Korean label so the
+        # affordance is still discoverable on hover.
+        def _icon_btn(glyph: str, tip: str, role: str = "icon-mini") -> QPushButton:
+            b = QPushButton(glyph)
+            b.setProperty("role", role)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setToolTip(tip)
+            b.setFixedWidth(26)
+            return b
+
+        # Hidden by default — toggled visible only when ``set_error(
+        # error, with_capture=True)`` runs after the runner emits
+        # failure_capture.
+        self._preview_btn = _icon_btn(
+            "📷",
             "마지막 실패 시 매크로가 본 화면 보기 — 영역/템플릿 조정에 도움이 돼요",
         )
         self._preview_btn.clicked.connect(
@@ -403,16 +434,25 @@ class StepCard(QFrame):
         self._preview_btn.setVisible(False)
         top.addWidget(self._preview_btn)
 
-        self._dup_btn = QPushButton("복제")
-        self._dup_btn.setProperty("role", "icon-mini")
-        self._dup_btn.setCursor(Qt.PointingHandCursor)
-        self._dup_btn.clicked.connect(lambda: self.duplicate_requested.emit(self._row))
+        # Edit (✏), duplicate (⎘), delete (🗑) — the three card actions.
+        # Double-clicking the card body also opens the editor, so the
+        # ✏ button is the second-class affordance.
+        self._edit_btn = _icon_btn("✏", "이 단계 편집 (더블클릭으로도 가능)")
+        self._edit_btn.clicked.connect(
+            lambda: self.edit_requested.emit(self._row)
+        )
+        top.addWidget(self._edit_btn)
+
+        self._dup_btn = _icon_btn("⎘", "이 단계 복제")
+        self._dup_btn.clicked.connect(
+            lambda: self.duplicate_requested.emit(self._row)
+        )
         top.addWidget(self._dup_btn)
 
-        self._del_btn = QPushButton("삭제")
-        self._del_btn.setProperty("role", "danger-ghost")
-        self._del_btn.setCursor(Qt.PointingHandCursor)
-        self._del_btn.clicked.connect(lambda: self.delete_requested.emit(self._row))
+        self._del_btn = _icon_btn("🗑", "이 단계 삭제", role="danger-ghost")
+        self._del_btn.clicked.connect(
+            lambda: self.delete_requested.emit(self._row)
+        )
         top.addWidget(self._del_btn)
 
         body_l.addLayout(top)
@@ -422,7 +462,10 @@ class StepCard(QFrame):
         self._trigger_lbl.setStyleSheet(
             f"color: {C['on-surface']}; font-size: 13px; font-weight: 600;"
         )
-        self._trigger_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        # Plain label — no text selection. Selectable text intercepts
+        # double-clicks (turning them into "select word") which would
+        # break the card-level double-click → edit dialog flow.
+        self._trigger_lbl.setTextInteractionFlags(Qt.NoTextInteraction)
         body_l.addWidget(self._trigger_lbl)
 
         # --- action sentence + inline meta ------------------------------
@@ -450,11 +493,11 @@ class StepCard(QFrame):
 
     def _refresh(self) -> None:
         kind = _trigger_kind(self._step)
-        self._stripe.set_kind(kind)
+        self._kind = kind
 
         self._badge.setProperty("badge", kind)
         self._badge.setText(_TRIGGER_LABEL[kind])
-        self._reapply_style()
+        self._apply_card_style()
 
         self._title_lbl.setText(self._step.name or "(이름 없음)")
 
@@ -482,11 +525,92 @@ class StepCard(QFrame):
             lbl.setProperty("role", "meta-tag")
             self._meta_row.addWidget(lbl)
 
-    def _reapply_style(self) -> None:
-        self.style().unpolish(self)
-        self.style().polish(self)
+    def _apply_card_style(self) -> None:
+        """Trigger a repaint after a state / kind change.
+
+        All visual decisions (background, stripe colour + height,
+        outline colour) are made inside ``paintEvent``; this just
+        marks the widget dirty and re-polishes the kind-coloured
+        badge so theme.py's ``QLabel[badge=...]`` selector kicks in.
+        """
+        self.update()
         self._badge.style().unpolish(self._badge)
         self._badge.style().polish(self._badge)
+
+    # Backwards-compatible alias — older call sites used _reapply_style.
+    _reapply_style = _apply_card_style
+
+    # --- painting -------------------------------------------------------
+
+    def enterEvent(self, event):  # noqa: N802 — Qt override
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):  # noqa: N802 — Qt override
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):  # noqa: N802 — Qt override
+        """Draw background + top stripe + outline in one antialiased
+        pass so the stripe corners and the outline corners share
+        geometry to the pixel (see module-level comment for why)."""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # 0.5 px inset gives a crisp 1-pixel-wide stroke at integer
+        # coordinates after antialiasing. Without it the outline
+        # smears into a 2 px fuzzy line.
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = 10.0
+
+        state = self.property("state") or "idle"
+        if state == "error":
+            border_color = QColor(C["quaternary"])
+            bg = QColor(C["surface-container"])
+        elif state == "active":
+            border_color = QColor(C["primary"])
+            bg = QColor(C["surface-container-high"])
+        else:
+            border_color = QColor(C["outline-variant"])
+            bg = QColor(
+                C["surface-container-high"] if self._hover
+                else C["surface-container"]
+            )
+        stripe_color = QColor(STRIPE.get(self._kind, C["outline"]))
+        stripe_h = 4.0 if state == "active" else 3.0
+
+        # 1) Card background — fully rounded.
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, radius, radius)
+
+        # 2) Top stripe — fill a band along the top, clipped to the
+        #    card's rounded path so its top corners trace the same
+        #    arc as the card outline. ``setClipPath`` accepts the
+        #    very same path we'll stroke as the outline below, which
+        #    is what guarantees pixel-level alignment.
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        painter.save()
+        painter.setClipPath(path)
+        painter.fillRect(
+            QRectF(rect.x(), rect.y(), rect.width(), stripe_h),
+            stripe_color,
+        )
+        painter.restore()
+
+        # 3) Outline — drawn last so it sits on top of bg + stripe and
+        #    closes both shapes with one continuous curve.
+        pen = QPen(border_color)
+        pen.setWidthF(1.0)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+
+        painter.end()
 
     # --- mouse selection + drag source ---------------------------------
 
@@ -528,6 +652,18 @@ class StepCard(QFrame):
     def mouseReleaseEvent(self, e):  # noqa: N802
         self._drag_start = None
         super().mouseReleaseEvent(e)
+
+    def mouseDoubleClickEvent(self, e):  # noqa: N802
+        """Double-click anywhere on the card → open the editor.
+
+        Buttons inside the card consume their own clicks before this
+        handler runs, so double-clicking the 편집/복제/삭제 row stays
+        unaffected — only the body opens the dialog."""
+        if e.button() == Qt.LeftButton:
+            self.edit_requested.emit(self._row)
+            e.accept()
+            return
+        super().mouseDoubleClickEvent(e)
 
     # --- drop target ----------------------------------------------------
 

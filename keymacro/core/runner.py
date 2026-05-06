@@ -38,6 +38,7 @@ from ..models.action import (
     NotifyAction,
     TypeAction,
     WaitAction,
+    WindowResizeAction,
 )
 from ..models.macro import Macro
 from ..models.ocr import ExtractTextAction, OcrTextTrigger
@@ -846,6 +847,10 @@ class Runner:
             self._call_sub_macro(action)
             return
 
+        if isinstance(action, WindowResizeAction):
+            self._do_window_resize(action)
+            return
+
         if isinstance(action, NotifyAction):
             from ..notify import channels as _ch
             text = self._sub(action.text)
@@ -964,6 +969,60 @@ class Runner:
         return substitute(text, self._vars)
 
     # --- sub-macro call -----------------------------------------------------
+
+    def _do_window_resize(self, action: "WindowResizeAction") -> None:
+        """Move/resize an OS window. Windows-only; raises a RuntimeError
+        on other platforms so on_failure routing kicks in instead of a
+        silent no-op."""
+        from . import win_window as ww
+
+        if not ww.is_supported():
+            raise RuntimeError(
+                "창 크기 조정은 Windows에서만 지원돼요 "
+                "(현재 플랫폼: 비-Windows)",
+            )
+
+        # Resolve target window. ``<active>`` picks the currently
+        # focused window — handy for "다음 동영상 재생 클릭한 후
+        # 그 창을 풀스크린으로" 시나리오. Anything else does a
+        # case-insensitive substring match on the title.
+        title = self._sub(action.title_match)
+        if title.strip() == "<active>":
+            info = ww.get_foreground_window()
+            if info is None:
+                raise RuntimeError("활성 창을 찾을 수 없어요")
+        else:
+            info = ww.find_window_by_title(title)
+            if info is None:
+                raise RuntimeError(
+                    f"창 제목 '{title}' 을 가진 창을 못 찾았어요. "
+                    f"여전히 떠 있는지, 정확한 제목인지 확인해 주세요.",
+                )
+
+        log.info(
+            "window_resize: target=%r (hwnd=%s) mode=%s",
+            info.title[:60], info.hwnd, action.mode,
+        )
+
+        if action.mode == "bounds":
+            ww.set_window_bounds(
+                info.hwnd, action.x, action.y, action.w, action.h,
+            )
+        elif action.mode == "maximize":
+            ww.maximize_window(info.hwnd)
+        elif action.mode == "minimize":
+            ww.minimize_window(info.hwnd)
+        elif action.mode == "restore":
+            ww.restore_window(info.hwnd)
+        elif action.mode == "fullscreen_monitor":
+            ww.fullscreen_on_monitor(info.hwnd, action.monitor_index)
+        else:
+            raise ValueError(f"unknown window mode: {action.mode}")
+
+        # Pop the window forward — without this a minimize-then-resize
+        # leaves the window in the back where the user can't see it.
+        if action.mode != "minimize":
+            ww.bring_to_foreground(info.hwnd)
 
     def _call_sub_macro(self, action: "CallMacroAction") -> None:
         """Run another macro inline.
