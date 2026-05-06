@@ -171,6 +171,12 @@ class Runner:
         # every fresh ``Runner(...)``.
         self._parallel_time_fired: set[str] = set()
         self._parallel_schedule_last: dict[str, str] = {}
+        # Random source for humanization jitter — seeded fresh per
+        # runner so two consecutive runs of the same macro produce
+        # different jitter patterns (which is the whole point of
+        # bot detection avoidance).
+        import random as _random
+        self._rng = _random.Random()
 
     # --- lazy dependency construction -----------------------------------------
 
@@ -1060,6 +1066,15 @@ class Runner:
         if total_s <= 0:
             self._check_stop_or_pause()
             return
+        # Apply humanization timing jitter once per top-level sleep
+        # call. The internal 0.05 s slicing for stop/pause checks
+        # stays uniform — jittering each slice would just average
+        # out to the original duration.
+        h = self.macro.humanization
+        if h.time_jitter_pct > 0:
+            spread = h.time_jitter_pct / 100.0
+            factor = 1.0 + self._rng.uniform(-spread, spread)
+            total_s = max(0.0, total_s * factor)
         end = self._clock() + total_s
         while True:
             now = self._clock()
@@ -1084,6 +1099,13 @@ class Runner:
             else:
                 x = action.x
                 y = action.y
+            # Click-position humanization — pixel-perfect dispatch is
+            # one of the easiest bot signals to detect. Each click
+            # gets a fresh uniform offset within ±click_position_px.
+            jitter_px = self.macro.humanization.click_position_px
+            if jitter_px > 0:
+                x += self._rng.randint(-jitter_px, jitter_px)
+                y += self._rng.randint(-jitter_px, jitter_px)
             inp.click(int(x), int(y), action.button, action.double)
             return
 
@@ -1102,7 +1124,21 @@ class Runner:
             if mode == "auto":
                 mode = "keystrokes" if text.isascii() else "clipboard"
             if mode == "keystrokes":
-                inp.type_text(text, action.interval_s)
+                # Apply per-character interval jitter at the wrapper
+                # level: many input backends accept a single delay,
+                # so we pre-compute a slightly-randomised value here.
+                # Real per-keystroke randomness would need backend
+                # support — this still breaks the "every key 80 ms
+                # apart" bot signal for a fraction of the work.
+                interval = action.interval_s
+                pct = self.macro.humanization.type_interval_jitter_pct
+                if pct > 0 and interval > 0:
+                    spread = pct / 100.0
+                    interval = max(
+                        0.0,
+                        interval * (1.0 + self._rng.uniform(-spread, spread)),
+                    )
+                inp.type_text(text, interval)
                 return
             # mode == "clipboard": save → set → Ctrl+V → restore so we
             # don't trash whatever the user had on their clipboard.

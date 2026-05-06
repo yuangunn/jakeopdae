@@ -19,6 +19,7 @@ from .action import (
     WindowResizeAction,
     Action,
 )
+from .humanization import HumanizationConfig
 from .step import Step
 from .macro import Macro
 from .hybrid import HybridImageTrigger
@@ -51,6 +52,7 @@ __all__ = [
     "DragAction",
     "WaitAction",
     "Action",
+    "HumanizationConfig",
     "Step",
     "Macro",
     "HybridImageTrigger",

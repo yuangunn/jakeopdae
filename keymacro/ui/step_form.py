@@ -412,12 +412,15 @@ class StepForm(QWidget):
         w = QWidget(); f = QFormLayout(w)
         self.click_x = QSpinBox(); self.click_x.setRange(-100000, 100000)
         self.click_y = QSpinBox(); self.click_y.setRange(-100000, 100000)
-        # "🎯 현재 마우스 위치 잡기" — 5초 카운트다운 후 QCursor.pos()
-        # 캡처해서 click_x / click_y에 채움. 실험적으로 픽셀 좌표
-        # 잡기 가장 빠른 워크플로.
-        self.click_pick_btn = QPushButton("🎯 현재 마우스 위치 잡기 (5초)")
+        # "🎯 클릭 위치 잡기" — overlay 띄워서 사용자가 원하는 좌표
+        # 직접 클릭. region picker와 같은 패턴 (countdown 안 씀).
+        self.click_pick_btn = QPushButton("🎯 클릭 위치 잡기")
         self.click_pick_btn.setProperty("role", "ghost")
         self.click_pick_btn.setCursor(Qt.PointingHandCursor)
+        self.click_pick_btn.setToolTip(
+            "버튼 클릭 → 화면에 십자선 오버레이가 떠요 → 원하는 위치를 클릭. "
+            "Esc 또는 우클릭으로 취소.",
+        )
         self.click_pick_btn.clicked.connect(self._on_pick_cursor_clicked)
         self.click_btn = _bilingual_combo([
             ("left", "왼쪽"), ("right", "오른쪽"), ("middle", "가운데"),
@@ -442,13 +445,16 @@ class StepForm(QWidget):
         self.action_stack.addWidget(w)
 
     def _on_pick_cursor_clicked(self) -> None:
-        """5-second countdown → capture ``QCursor.pos()`` into the
-        click_x / click_y fields. Reuses ``WindowPickerDialog`` styling
-        for consistency."""
-        from .cursor_picker import CursorPickerDialog
-        dlg = CursorPickerDialog(self)
-        dlg.picked.connect(self._on_cursor_picked)
-        dlg.show()
+        """Open the fullscreen overlay; clicking on the desktop drops
+        the absolute coordinate into click_x / click_y. This replaces
+        the original 5-second countdown picker — direct click is more
+        natural and matches the existing region-picker flow."""
+        from .click_picker import ClickPickerOverlay
+        # Stash on self so the picker isn't garbage collected mid-pick.
+        self._click_picker = ClickPickerOverlay()
+        self._click_picker.picked.connect(self._on_cursor_picked)
+        self._click_picker.cancelled.connect(self._click_picker.deleteLater)
+        self._click_picker.show()
 
     def _on_cursor_picked(self, x: int, y: int) -> None:
         self.click_x.setValue(x)

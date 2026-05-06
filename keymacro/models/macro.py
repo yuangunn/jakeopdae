@@ -6,6 +6,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, field_validator
 
+from .humanization import HumanizationConfig
 from .step import Step
 from .web import WebSessionConfig
 
@@ -49,6 +50,10 @@ class Macro(BaseModel):
     """Initial macro-level variables. Steps can reference them in any
     string field via ``${name}`` substitution; ``ExtractTextAction``
     populates new ones at runtime."""
+    humanization: HumanizationConfig = HumanizationConfig()
+    """Anti-bot-detection knobs (timing jitter, click position
+    jitter, typing-interval jitter). All zero by default = original
+    deterministic behaviour. See :class:`HumanizationConfig`."""
 
     @field_validator("name")
     @classmethod

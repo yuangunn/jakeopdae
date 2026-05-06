@@ -254,6 +254,33 @@ class MainWindow(QMainWindow):
         dialog is created lazily on first access so this stays cheap."""
         return self._ensure_form_dialog().form
 
+    def _on_open_humanization(self) -> None:
+        """Pop the humanization (anti-bot) settings dialog. Saves
+        the new config back into the macro and marks dirty."""
+        from .humanization_dialog import HumanizationDialog
+        dlg = HumanizationDialog(self._macro.humanization, self)
+        dlg.saved.connect(self._on_humanization_saved)
+        dlg.exec()
+
+    def _on_humanization_saved(self, cfg) -> None:
+        if cfg == self._macro.humanization:
+            return
+        self._snapshot_macro()
+        try:
+            self._macro = self._macro.model_copy(update={"humanization": cfg})
+        except Exception:
+            self._toast_error("매크로 방지 설정 저장 실패")
+            return
+        self._dirty = True
+        self._update_title()
+        if cfg.is_active:
+            self._toast_success(
+                f"매크로 방지 켜짐 — 시간 ±{cfg.time_jitter_pct:.0f}%, "
+                f"클릭 ±{cfg.click_position_px}px, 타이핑 ±{cfg.type_interval_jitter_pct:.0f}%",
+            )
+        else:
+            self._toast_info("매크로 방지 꺼짐 (모든 흔들림 0)")
+
     def _on_mode_toggled(self, new_mode: str) -> None:
         """User flipped the 순차 / 동시 pill — apply to the in-memory
         macro and mark dirty so save picks it up."""
@@ -441,6 +468,9 @@ class MainWindow(QMainWindow):
         act_export.triggered.connect(self._on_export)
         act_import = more_menu.addAction(".kma 가져오기")
         act_import.triggered.connect(self._on_import)
+        more_menu.addSeparator()
+        act_humanize = more_menu.addAction("🛡  매크로 방지 설정…")
+        act_humanize.triggered.connect(self._on_open_humanization)
         more_menu.addSeparator()
         act_history = more_menu.addAction("실행 이력")
         act_history.triggered.connect(self._on_show_history)
