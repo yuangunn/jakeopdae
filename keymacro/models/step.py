@@ -35,6 +35,12 @@ class Step(BaseModel):
     if it times out (i.e. user is logged out), the runner advances to
     the next step which begins the login flow."""
     repeat: int = 1
+    priority: int = 0
+    """Tie-breaker for parallel mode. When ``Macro.mode == 'parallel'``
+    every step is polled each cycle; if more than one trigger matches
+    in the same pass, the highest-priority step fires. Steps with the
+    same priority break ties by list order. Ignored in sequential mode.
+    """
 
     @field_validator("id")
     @classmethod

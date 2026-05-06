@@ -254,6 +254,29 @@ class MainWindow(QMainWindow):
         dialog is created lazily on first access so this stays cheap."""
         return self._ensure_form_dialog().form
 
+    def _on_mode_toggled(self, new_mode: str) -> None:
+        """User flipped the 순차 / 동시 pill — apply to the in-memory
+        macro and mark dirty so save picks it up."""
+        if new_mode not in ("sequential", "parallel"):
+            return
+        if self._macro.mode == new_mode:
+            return
+        self._snapshot_macro()
+        try:
+            self._macro = self._macro.model_copy(update={"mode": new_mode})
+        except Exception:
+            self._toast_error("실행 모드 변경 실패")
+            return
+        self._dirty = True
+        self._update_title()
+        if new_mode == "parallel":
+            self._toast_info(
+                "동시 모드: 모든 단계의 트리거를 동시에 감시해요. "
+                "매칭되는 단계가 발사되고 다시 감시.",
+            )
+        else:
+            self._toast_info("순차 모드: 단계 1→2→3 차례로 진행")
+
     def _open_step_editor(self, row: int) -> None:
         """Show the popup editor with the macro step at ``row``."""
         if not (0 <= row < len(self._macro.steps)):
@@ -481,6 +504,7 @@ class MainWindow(QMainWindow):
         self.list_panel.move_down_requested.connect(lambda r: self._move_step(+1))
         self.list_panel.reorder_requested.connect(self._on_reorder_steps)
         self.list_panel.examples_requested.connect(self._on_browse_examples)
+        self.list_panel.mode_toggled.connect(self._on_mode_toggled)
 
         # Form signals are wired inside ``_ensure_form_dialog`` when
         # the popup is first created — there's no embedded form on
@@ -589,6 +613,10 @@ class MainWindow(QMainWindow):
             select_index=select_index,
             show_examples_button=(not self._macro.steps) and examples_available,
         )
+        # Reflect the current macro's mode on the header pill — done
+        # without firing the toggle signal so loading a yaml doesn't
+        # round-trip through ``_on_mode_toggled``.
+        self.list_panel.set_mode(self._macro.mode)
         self._refresh_transport_kind_lookup()
         self._refresh_preflight_issues()
         # If the edit dialog is open, refresh its contents so the user

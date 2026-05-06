@@ -162,6 +162,15 @@ class Runner:
         # before ``CallMacroAction`` recurses, popped after. Used to
         # break a → b → a accidents without blowing the stack.
         self._call_chain: list[str] = []
+        # Parallel-mode bookkeeping. ``_parallel_time_fired`` tracks
+        # which TimeTrigger steps have already fired in this run (so
+        # they only pulse once, not every cycle); the schedule dict
+        # tracks the last "YYYY-MM-DD HH:MM" stamp each schedule
+        # trigger fired, to avoid double-firing inside the grace
+        # window. Set on the runner so they reset implicitly on
+        # every fresh ``Runner(...)``.
+        self._parallel_time_fired: set[str] = set()
+        self._parallel_schedule_last: dict[str, str] = {}
 
     # --- lazy dependency construction -----------------------------------------
 
@@ -250,49 +259,10 @@ class Runner:
                         "which does not exist"
                     )
 
-            run_start = self._clock()
-            current_id: Optional[str] = self.macro.steps[0].id
-
-            while current_id is not None:
-                if self._should_stop():
-                    result.aborted_at = current_id
-                    log.info("stop requested at step %s", current_id)
-                    break
-                elapsed = self._clock() - run_start
-                if elapsed > self.macro.max_total_runtime_s:
-                    result.aborted_at = current_id
-                    log.warning(
-                        "max_total_runtime_s exceeded (%.2fs > %.2fs)",
-                        elapsed, self.macro.max_total_runtime_s,
-                    )
-                    break
-
-                step = steps_by_id[current_id]
-                sr = self._run_step(step)
-                result.step_results.append(sr)
-                self._observer.on_step_end(step.id, sr.success, sr.match, sr.error)
-
-                if sr.success:
-                    current_id = step.on_success_goto or self._next_id(step)
-                    continue
-
-                # Failure path. ``on_failure_goto`` (when set) overrides
-                # the default skip/abort behaviour — the step counts as
-                # failed but the run jumps to the named branch instead
-                # of advancing or aborting. Lets users build "if image
-                # visible → A; else → B" patterns without an extra
-                # marker step.
-                if step.on_failure_goto:
-                    current_id = step.on_failure_goto
-                    continue
-
-                if step.on_failure == "skip":
-                    current_id = self._next_id(step)
-                    continue
-
-                result.aborted_at = step.id
-                break
-
+            if self.macro.mode == "parallel":
+                self._run_parallel(result)
+            else:
+                self._run_sequential(result, steps_by_id)
             result.completed = result.aborted_at is None
             return result
         finally:
@@ -311,6 +281,367 @@ class Runner:
             if isinstance(s.action, (WebClickAction, WebTypeAction, WebNavigateAction)):
                 return True
         return False
+
+    # --- one-shot trigger probes (parallel mode) ------------------------------
+
+    def _probe_trigger_once(
+        self,
+        step: Step,
+        clipboard_baseline: dict,
+    ) -> Optional[object]:
+        """Single-pass evaluation of a step's trigger.
+
+        Returns:
+            - a :class:`MatchResult` for image triggers when found
+            - ``True`` for non-image triggers when fired
+            - ``None`` when the trigger didn't match this pass
+
+        Designed to be cheap — no looping, no waiting; the parallel
+        run loop already provides the cadence. Triggers that block by
+        design (TimeTrigger.delay_s, ScheduleTrigger HH:MM wait) are
+        evaluated in instant-only form: TimeTrigger fires only on the
+        very first probe of a given step (so a delay-0 step pulses
+        once per parallel run, not every cycle); ScheduleTrigger fires
+        when the wall clock currently matches one of its slots.
+        """
+        trig = step.trigger
+
+        if isinstance(trig, ImageTrigger):
+            return self._probe_image(step.id, trig)
+        if isinstance(trig, HybridImageTrigger):
+            return self._probe_hybrid_image(step.id, trig)
+        if isinstance(trig, PixelColorTrigger):
+            return self._probe_pixel(trig)
+        if isinstance(trig, OcrTextTrigger):
+            return self._probe_ocr(trig)
+        if isinstance(trig, WebElementVisibleTrigger):
+            return self._probe_web_element(trig)
+        if isinstance(trig, WebUrlTrigger):
+            return self._probe_web_url(trig)
+        if isinstance(trig, ClipboardChangeTrigger):
+            return self._probe_clipboard(step.id, trig, clipboard_baseline)
+        if isinstance(trig, ScheduleTrigger):
+            return self._probe_schedule(trig)
+        if isinstance(trig, TimeTrigger):
+            # Fire only once per step, at the first probe — otherwise
+            # a delay-0 TimeTrigger would re-fire every cycle and the
+            # action would loop forever.
+            if step.id in self._parallel_time_fired:
+                return None
+            self._parallel_time_fired.add(step.id)
+            return True
+        log.warning("parallel mode: no probe for %s", type(trig).__name__)
+        return None
+
+    def _probe_image(self, step_id: str, trig):
+        template = self._load_template(trig.template)
+        cap = self._capturer_or_default()
+        haystack = cap.grab(
+            trig.region.x, trig.region.y, trig.region.w, trig.region.h,
+        )
+        result = match_template(
+            template, haystack,
+            confidence=trig.confidence,
+            multi_scale=trig.multi_scale,
+            scale_min=trig.scale_min, scale_max=trig.scale_max,
+            scale_steps=trig.scale_steps,
+        )
+        self._observer.on_match_attempt(step_id, result.score, result.found)
+        return result if result.found else None
+
+    def _probe_pixel(self, trig):
+        cap = self._capturer_or_default()
+        img = cap.grab(trig.x, trig.y, 1, 1)
+        b, g, r = int(img[0, 0, 0]), int(img[0, 0, 1]), int(img[0, 0, 2])
+        tr, tg, tb = trig.rgb
+        if (
+            abs(r - tr) <= trig.tolerance
+            and abs(g - tg) <= trig.tolerance
+            and abs(b - tb) <= trig.tolerance
+        ):
+            return True
+        return None
+
+    def _probe_ocr(self, trig):
+        try:
+            cap = self._capturer_or_default()
+            haystack = cap.grab(
+                trig.region.x, trig.region.y, trig.region.w, trig.region.h,
+            )
+            text = ocr_read_text(haystack, language=trig.language)
+        except TesseractMissing:
+            return None
+        if text_matches(
+            text, trig.text, trig.mode, case_sensitive=trig.case_sensitive,
+        ):
+            return True
+        return None
+
+    def _probe_web_element(self, trig):
+        if not self._web_started or self._web_session is None:
+            return None
+        try:
+            ok = self._web().is_element_state(
+                self._sub(trig.selector),
+                trig.state,
+                timeout_s=0.05,
+            )
+        except Exception:
+            return None
+        if ok:
+            scope = self._sub(trig.url_contains) if trig.url_contains else ""
+            if scope:
+                try:
+                    page = self._web().page()
+                    cur = page.url() if hasattr(page, "url") else ""
+                    if scope not in (cur or ""):
+                        return None
+                except Exception:
+                    return None
+            return True
+        return None
+
+    def _probe_web_url(self, trig):
+        if not self._web_started or self._web_session is None:
+            return None
+        try:
+            page = self._web().page()
+            cur = page.url() if hasattr(page, "url") else ""
+        except Exception:
+            return None
+        if url_matches(cur or "", trig.pattern, trig.mode):
+            return True
+        return None
+
+    def _probe_hybrid_image(self, step_id: str, trig):
+        # URL gate first — if the browser isn't on the right page,
+        # there's no reason to even capture pixels.
+        try:
+            cur_url = read_browser_url(trig.browser)
+        except Exception:
+            return None
+        if not browser_url_matches(cur_url, trig.url_contains, trig.url_mode):
+            return None
+        template = self._load_template(trig.template)
+        cap = self._capturer_or_default()
+        haystack = cap.grab(
+            trig.region.x, trig.region.y, trig.region.w, trig.region.h,
+        )
+        result = match_template(
+            template, haystack,
+            confidence=trig.confidence,
+            multi_scale=trig.multi_scale,
+            scale_min=trig.scale_min, scale_max=trig.scale_max,
+            scale_steps=trig.scale_steps,
+        )
+        self._observer.on_match_attempt(step_id, result.score, result.found)
+        return result if result.found else None
+
+    def _probe_clipboard(self, step_id: str, trig, baseline: dict):
+        """Match if clipboard contents changed since baseline AND
+        the new contents satisfy the regex pattern."""
+        import re as _re
+        from .clipboard import ClipboardUnavailable, get_clipboard_text
+        if step_id not in baseline:
+            try:
+                baseline[step_id] = get_clipboard_text()
+            except ClipboardUnavailable:
+                baseline[step_id] = ""
+            return None
+        try:
+            current = get_clipboard_text()
+        except ClipboardUnavailable:
+            return None
+        if current == baseline[step_id]:
+            return None
+        m = _re.search(trig.pattern, current)
+        if m is None:
+            # Update baseline so we don't keep matching against an
+            # unrelated stale change.
+            baseline[step_id] = current
+            return None
+        self._vars[trig.capture_var] = m.group(0)
+        baseline[step_id] = current
+        return True
+
+    def _probe_schedule(self, trig):
+        from datetime import datetime
+        now = datetime.now()
+        h, m = (int(x) for x in trig.at.split(":"))
+        scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        if now.weekday() not in trig.weekdays:
+            return None
+        diff = (now - scheduled).total_seconds()
+        # Fire if we're within grace_s seconds *after* the slot. Avoid
+        # double-firing within the same minute via the runner-level
+        # bookkeeping dict — keyed by the trigger's ``at`` value since
+        # each step holds at most one schedule trigger.
+        if 0 <= diff <= trig.grace_s:
+            stamp = now.strftime("%Y-%m-%d %H:%M")
+            key = trig.at
+            if self._parallel_schedule_last.get(key) == stamp:
+                return None
+            self._parallel_schedule_last[key] = stamp
+            return True
+        return None
+
+    # --- run loops ------------------------------------------------------------
+
+    def _run_sequential(
+        self, result: RunResult, steps_by_id: dict,
+    ) -> None:
+        """Original step-by-step execution: each step's trigger blocks
+        until it fires (or times out), then the action runs, then we
+        advance to the next step. ``on_success_goto`` /
+        ``on_failure_goto`` drive branching."""
+        run_start = self._clock()
+        current_id: Optional[str] = self.macro.steps[0].id
+
+        while current_id is not None:
+            if self._should_stop():
+                result.aborted_at = current_id
+                log.info("stop requested at step %s", current_id)
+                return
+            elapsed = self._clock() - run_start
+            if elapsed > self.macro.max_total_runtime_s:
+                result.aborted_at = current_id
+                log.warning(
+                    "max_total_runtime_s exceeded (%.2fs > %.2fs)",
+                    elapsed, self.macro.max_total_runtime_s,
+                )
+                return
+
+            step = steps_by_id[current_id]
+            sr = self._run_step(step)
+            result.step_results.append(sr)
+            self._observer.on_step_end(step.id, sr.success, sr.match, sr.error)
+
+            if sr.success:
+                current_id = step.on_success_goto or self._next_id(step)
+                continue
+
+            # Failure path. ``on_failure_goto`` (when set) overrides
+            # the default skip/abort behaviour — the step counts as
+            # failed but the run jumps to the named branch instead
+            # of advancing or aborting.
+            if step.on_failure_goto:
+                current_id = step.on_failure_goto
+                continue
+
+            if step.on_failure == "skip":
+                current_id = self._next_id(step)
+                continue
+
+            result.aborted_at = step.id
+            return
+
+    def _run_parallel(self, result: RunResult) -> None:
+        """Watch every step's trigger concurrently in a round-robin
+        polling loop. As soon as one fires, run that step's action,
+        then resume watching all triggers from the top.
+
+        Useful for matchers that don't have a fixed order — e.g. "다음
+        버튼 보이면 클릭, 퀴즈 보이면 답 입력, 강의 끝 보이면
+        navigate" workflows where any of the events can happen in any
+        order over a long session.
+
+        Tie-breaking: when two triggers match in the same poll cycle,
+        the higher-priority step fires; same priority falls back to
+        list order. After firing, the loop sleeps a short interval
+        (the *minimum* poll_interval_s across all steps, floored at
+        50 ms) before the next pass — keeping latency low without
+        busy-spinning.
+        """
+        # Pre-sort step indices by priority (high first), then list
+        # order. Cached because ``Step`` is immutable inside one run.
+        ordered = sorted(
+            range(len(self.macro.steps)),
+            key=lambda i: (
+                -self.macro.steps[i].priority,
+                i,
+            ),
+        )
+        # Aggregate the smallest poll interval among triggers that
+        # expose one — TimeTrigger / CallMacroAction etc don't, so we
+        # fall back to 0.1 s for anything without it.
+        poll_intervals = []
+        for s in self.macro.steps:
+            v = getattr(s.trigger, "poll_interval_s", None)
+            if isinstance(v, (int, float)) and v > 0:
+                poll_intervals.append(float(v))
+        sleep_between_passes = max(0.05, min(poll_intervals) if poll_intervals else 0.1)
+
+        # ``ClipboardChangeTrigger`` needs a baseline; capture it once
+        # per step so subsequent firings see "changed" rather than
+        # the at-startup state. ``TimeTrigger`` would be a no-op here
+        # so we ignore it — parallel mode is for event-driven steps.
+        clipboard_baseline: dict[str, str] = {}
+
+        run_start = self._clock()
+        last_match: Optional[MatchResult] = None
+        while True:
+            if self._should_stop():
+                log.info("stop requested in parallel mode")
+                return
+            elapsed = self._clock() - run_start
+            if elapsed > self.macro.max_total_runtime_s:
+                log.info(
+                    "parallel run hit max_total_runtime_s (%.0fs)",
+                    self.macro.max_total_runtime_s,
+                )
+                return
+
+            fired = False
+            for idx in ordered:
+                step = self.macro.steps[idx]
+                outcome = self._probe_trigger_once(step, clipboard_baseline)
+                if outcome is None:
+                    continue
+                # Fire this step.
+                self._observer.on_step_start(step.id, attempt=1, iteration=0)
+                match = outcome if isinstance(outcome, MatchResult) else None
+                if match is not None:
+                    self._last_match = match
+                    last_match = match
+                try:
+                    self._do_action(step.action, match)
+                except _StopRequested:
+                    log.info("stop requested during parallel action")
+                    return
+                except Exception as e:  # noqa: BLE001
+                    log.exception("parallel action failed: %s", step.id)
+                    self._observer.on_step_end(
+                        step.id, False, match, f"action_failed: {e!r}",
+                    )
+                    sr = StepResult(
+                        step.id, success=False,
+                        error=f"action_failed: {e!r}",
+                        match=match,
+                        attempts=1, iterations_completed=0,
+                        duration_s=0.0,
+                    )
+                    result.step_results.append(sr)
+                    fired = True
+                    # On parallel mode, an action error doesn't kill
+                    # the loop — let the user fix it and let the next
+                    # match still fire.
+                    break
+                self._observer.on_step_end(step.id, True, match, None)
+                sr = StepResult(
+                    step.id, success=True, match=match,
+                    attempts=1, iterations_completed=1,
+                    duration_s=0.0,
+                )
+                result.step_results.append(sr)
+                fired = True
+                break  # single fire per pass — let world settle
+
+            try:
+                self._interruptible_sleep(
+                    sleep_between_passes if not fired else 0.05,
+                )
+            except _StopRequested:
+                return
 
     # --- step execution -------------------------------------------------------
 

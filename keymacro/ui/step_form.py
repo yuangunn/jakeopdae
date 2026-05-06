@@ -225,6 +225,12 @@ class StepForm(QWidget):
         self.goto_failure.setPlaceholderText(
             "실패 시 점프할 단계 ID (비우면 위 '실패하면?' 정책 적용)"
         )
+        # Phase B: parallel-mode priority. Higher = fires first when
+        # multiple triggers match in the same poll pass. Sequential
+        # mode ignores this field.
+        self.priority = QSpinBox()
+        self.priority.setRange(-100, 100)
+        self.priority.setValue(0)
         gl.addRow("ID", self.id_edit)
         gl.addRow("이름", self.name_edit)
         gl.addRow("실패하면?", self.on_failure)
@@ -232,6 +238,7 @@ class StepForm(QWidget):
         gl.addRow("이 단계 반복", self.repeat)
         gl.addRow("성공 시 다음 단계", self.goto)
         gl.addRow("실패 시 다음 단계", self.goto_failure)
+        gl.addRow("우선순위 (동시 모드)", self.priority)
         outer.addWidget(general)
 
         # Trigger group.
@@ -305,6 +312,7 @@ class StepForm(QWidget):
         self.on_failure.currentIndexChanged.connect(self._emit_changed)
         self.retry_count.valueChanged.connect(self._emit_changed)
         self.repeat.valueChanged.connect(self._emit_changed)
+        self.priority.valueChanged.connect(self._emit_changed)
 
         # Wheel-blocking is handled by the local QComboBox / QSpinBox /
         # QDoubleSpinBox subclasses defined at the top of this module —
@@ -1136,6 +1144,7 @@ class StepForm(QWidget):
             self.repeat.setValue(step.repeat)
             self.goto.setText(step.on_success_goto or "")
             self.goto_failure.setText(step.on_failure_goto or "")
+            self.priority.setValue(step.priority)
 
             self._load_trigger(step.trigger)
             self._load_action(step.action)
@@ -1333,6 +1342,7 @@ class StepForm(QWidget):
             repeat=self.repeat.value(),
             on_success_goto=(self.goto.text().strip() or None),
             on_failure_goto=(self.goto_failure.text().strip() or None),
+            priority=self.priority.value(),
         )
 
     def _build_trigger(self) -> Trigger:

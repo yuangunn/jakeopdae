@@ -43,6 +43,9 @@ class StepListPanel(QWidget):
     """Fired when the empty-state's "📚 예제 살펴보기" button is clicked."""
     preview_failure_requested = Signal(int)
     """Fired when the user clicks "📷 실패 화면" on an errored card."""
+    mode_toggled = Signal(str)
+    """Emitted with ``"sequential"`` or ``"parallel"`` when the user
+    flips the mode pill in the header."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -69,6 +72,20 @@ class StepListPanel(QWidget):
         )
         header.addWidget(self._count_lbl)
         header.addStretch()
+
+        # Mode toggle — clicking flips between sequential and
+        # parallel. ``set_mode`` (called by MainWindow when a macro
+        # loads) updates the visual without firing the signal.
+        self._mode = "sequential"
+        self._mode_btn = QPushButton("▶ 순차")
+        self._mode_btn.setProperty("role", "ghost")
+        self._mode_btn.setCursor(Qt.PointingHandCursor)
+        self._mode_btn.setToolTip(
+            "순차: 단계 1→2→3 차례로 실행\n"
+            "동시: 모든 단계의 트리거를 한꺼번에 감시 → 매칭되는 게 발사",
+        )
+        self._mode_btn.clicked.connect(self._on_mode_clicked)
+        header.addWidget(self._mode_btn)
 
         # Reorder buttons inline with header
         self._up_btn = QPushButton("▲")
@@ -190,3 +207,21 @@ class StepListPanel(QWidget):
     def _fire_move(self, signal) -> None:
         if self._selected_row >= 0:
             signal.emit(self._selected_row)
+
+    # --- run mode toggle ----------------------------------------------------
+
+    def set_mode(self, mode: str) -> None:
+        """Update the displayed mode without emitting a signal — used
+        by the host when loading a macro from disk."""
+        if mode not in ("sequential", "parallel"):
+            mode = "sequential"
+        self._mode = mode
+        if mode == "parallel":
+            self._mode_btn.setText("⇄ 동시")
+        else:
+            self._mode_btn.setText("▶ 순차")
+
+    def _on_mode_clicked(self) -> None:
+        new_mode = "parallel" if self._mode == "sequential" else "sequential"
+        self.set_mode(new_mode)
+        self.mode_toggled.emit(new_mode)

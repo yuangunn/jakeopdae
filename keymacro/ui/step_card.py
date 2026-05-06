@@ -235,6 +235,8 @@ def _meta_tags(step: Step) -> list[str]:
         out.append(f"성공→{step.on_success_goto}")
     if step.on_failure_goto:
         out.append(f"실패→{step.on_failure_goto}")
+    if step.priority != 0:
+        out.append(f"우선순위 {step.priority:+d}")
     return out
 
 
